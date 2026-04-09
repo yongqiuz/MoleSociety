@@ -1,5 +1,5 @@
 {
-  "name": "whale-vault-nft-plus",
+  "name": "mole-society",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "ethers": "^6.13.5",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.1.4",

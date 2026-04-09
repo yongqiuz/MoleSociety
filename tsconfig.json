@@ -11,6 +11,6 @@
     "noEmit": true,
     "strict": true
   },
-  "include": ["src/main.ts", "src/App.vue", "src/vite-env.d.ts", "src/api/**/*.ts", "src/composables/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.vue", "src/vite-env.d.ts"],
   "exclude": ["src/**/*.tsx", "src/hooks/**/*.ts", "src/state/**/*.ts", "src/config/**/*.ts"]
 }

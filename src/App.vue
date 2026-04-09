@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import {
   createConversationMessage,
   createMediaAsset,
@@ -14,6 +15,7 @@ import {
   type SocialPost,
   type SocialUser,
 } from './api/socialApi';
+import { useAuth } from './composables/useAuth';
 import { useAppearance, type AppearanceSettings, type ColorScheme } from './composables/useAppearance';
 
 type Section =
@@ -249,6 +251,8 @@ const threadReplies = ref<FeedCard[]>([]);
 const activeReplyTarget = ref<FeedCard | null>(null);
 const replyComposerRef = ref<HTMLDivElement | null>(null);
 const replyTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const router = useRouter();
+const { session: authSession } = useAuth();
 
 const { appearanceSettings, resolvedTheme, saveAppearanceSettings } = useAppearance();
 const appearanceDraft = ref<AppearanceSettings>({ ...appearanceSettings.value });
@@ -533,6 +537,31 @@ function profileLabel(user: SocialUser | null) {
   return `${user.handle}@${user.instance}`;
 }
 
+function resolveAuthenticatedUser(users: SocialUser[]) {
+  const sessionUser = authSession.value;
+  if (!sessionUser) return null;
+
+  const matchedUser = users.find((user) => user.id === sessionUser.id);
+  if (matchedUser) return matchedUser;
+
+  return {
+    id: sessionUser.id,
+    handle: sessionUser.handle,
+    displayName: sessionUser.displayName,
+    bio: sessionUser.bio,
+    instance: sessionUser.instance,
+    wallet: '0xauth',
+    avatarUrl: sessionUser.avatarUrl,
+    followers: 0,
+    following: 0,
+    createdAt: new Date().toISOString(),
+  } satisfies SocialUser;
+}
+
+function goToLogout() {
+  void router.push('/logout');
+}
+
 function toFeedCard(post: SocialPost): FeedCard {
   const firstMedia = Array.isArray(post.media) ? post.media[0] : undefined;
   const person = people.value.find((item) => item.id === post.authorId);
@@ -594,7 +623,7 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
 }
 
 function applyBootstrap(payload: BootstrapPayload) {
-  currentUser.value = payload.currentUser ?? payload.users[0] ?? fallbackUser;
+  currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? fallbackUser;
   people.value = payload.users.length ? payload.users : fallbackPeople;
   posts.value = payload.feed.map(toFeedCard);
   assets.value = payload.media.map(toAssetCard);
@@ -608,7 +637,7 @@ function applyBootstrap(payload: BootstrapPayload) {
 function applyFallback(message: string) {
   apiOnline.value = false;
   errorMessage.value = message;
-  currentUser.value = fallbackUser;
+  currentUser.value = resolveAuthenticatedUser(fallbackPeople) ?? fallbackUser;
   people.value = fallbackPeople;
   posts.value = fallbackPosts;
   assets.value = fallbackAssets;
@@ -975,6 +1004,19 @@ onMounted(loadBootstrap);
                 <div class="truncate text-xl font-semibold text-[color:var(--text-primary)]">{{ currentUser?.displayName }}</div>
                 <div class="truncate text-base text-[color:var(--text-secondary)]">{{ profileLabel(currentUser) }}</div>
               </div>
+            </div>
+
+            <div class="flex items-center justify-between rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm">
+              <div class="flex items-center gap-4 text-[color:var(--text-secondary)]">
+                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.followers ?? 0 }}</strong> 关注者</span>
+                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.following ?? 0 }}</strong> 正在关注</span>
+              </div>
+              <button
+                @click="goToLogout"
+                class="rounded-full border border-[color:var(--border-color)] px-3 py-2 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+              >
+                退出登录
+              </button>
             </div>
 
             <div class="rounded-[22px] border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-4">
