@@ -8,6 +8,7 @@ import {
   fetchPostReplies,
   fetchPostThread,
   fetchSocialBootstrap,
+  fetchSocialBootstrapMine,
   type BootstrapPayload,
   type FederationInstance,
   type MediaAsset,
@@ -21,7 +22,8 @@ import {
   Home, Compass, Bell, List, Hash, Star, Bookmark, AtSign, Settings,
   MoreHorizontal, User, Shield, PenTool, Mail, AlignJustify, Users,
   Filter, Trash2, Image as ImageIcon, CheckSquare, AlertTriangle, Smile, Search,
-  ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper
+  ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
+  Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3
 } from 'lucide-vue-next';
 import { useAppearance, type AppearanceSettings, type ColorScheme } from '../composables/useAppearance';
 
@@ -78,6 +80,8 @@ type FeedCard = {
     boosts: number;
     likes: number;
   };
+  interaction: string;
+  poll?: Poll;
 };
 
 type AssetCard = {
@@ -113,7 +117,7 @@ const primaryNavItems: { label: string; key: Section; icon: Component }[] = [
 
 const secondaryNavItems: { label: string; key: Section; icon: Component }[] = [
   { label: '列表', key: 'lists', icon: List },
-  { label: '探索话题', key: 'topics', icon: Hash },
+  { label: '关注的话题', key: 'topics', icon: Hash },
   { label: '喜欢', key: 'likes', icon: Star },
   { label: '书签', key: 'bookmarks', icon: Bookmark },
   { label: '提及', key: 'mentions', icon: AtSign },
@@ -192,6 +196,7 @@ const fallbackPosts: FeedCard[] = [
     time: '刚刚',
     content: '欢迎来到 Whale Vault Social。本地离线预览模式。',
     type: 'post',
+    interaction: 'anyone',
     bio: '离线回退内容',
     tags: ['离线模式', '社交界面'],
     chainProof: 'local://fallback/post-1',
@@ -236,6 +241,10 @@ const assets = ref<AssetCard[]>([]);
 const conversations = ref<ConversationCard[]>([]);
 const instances = ref<FederationInstance[]>([]);
 const postDraft = ref('');
+const showPollEditor = ref(false);
+const pollOptions = ref(['', '']);
+const pollExpiresIn = ref(1440); // 1 day
+const pollMultiple = ref(false);
 const messageDraft = ref('');
 const searchQuery = ref('');
 const selectedConversationId = ref('');
@@ -257,16 +266,58 @@ const threadFocusPost = ref<FeedCard | null>(null);
 const threadAncestors = ref<FeedCard[]>([]);
 const threadReplies = ref<FeedCard[]>([]);
 const activeReplyTarget = ref<FeedCard | null>(null);
-const replyComposerRef = ref<HTMLDivElement | null>(null);
 const replyTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const router = useRouter();
 const { session: authSession } = useAuth();
+
+const isLoggedIn = computed(() => !!authSession.value);
 
 const { themeStyles } = useAppearance();
 
 const activeExploreTab = ref<ExploreTab>('posts');
 
 const newsPosts = computed(() => posts.value.filter(p => p.type === 'news'));
+const activeMoreMenuId = ref<string | null>(null);
+
+function toggleMoreMenu(postId: string) {
+  activeMoreMenuId.value = activeMoreMenuId.value === postId ? null : postId;
+}
+
+function handleMenuAction(action: string, post: FeedCard) {
+  activeMoreMenuId.value = null; // Close menu after action
+  // Placeholder actions
+  console.log(`Action [${action}] on post:`, post.id);
+}
+
+// Visibility and Interaction State
+const visibility = ref('public');
+const interaction = ref('anyone');
+const showVisibilityModal = ref(false);
+const tempVisibility = ref('public');
+const tempInteraction = ref('anyone');
+const showVisibilityDropdown = ref(false);
+const showInteractionDropdown = ref(false);
+
+const visibilityOptions = [
+  { id: 'public', label: '公开', description: '所有人可见', icon: Globe },
+  { id: 'unlisted', label: '悄悄公开', description: '不出现在搜索或公共时间线', icon: Moon },
+  { id: 'private', label: '关注者', description: '仅限你的关注者', icon: Lock },
+  { id: 'direct', label: '私下提及', description: '仅提到的用户可见', icon: AtSign },
+];
+
+const interactionOptions = [
+  { id: 'anyone', label: '任何人' },
+  { id: 'followers', label: '仅关注者' },
+  { id: 'me', label: '仅限自己' },
+];
+
+const selectedVisibilityItem = computed(() => 
+  visibilityOptions.find(opt => opt.id === visibility.value) || visibilityOptions[0]
+);
+
+const selectedInteractionItem = computed(() => 
+  interactionOptions.find(opt => opt.id === interaction.value) || interactionOptions[0]
+);
 
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === selectedConversationId.value),
@@ -510,6 +561,7 @@ function toFeedCard(post: SocialPost): FeedCard {
     time: formatTimestamp(post.createdAt),
     content: post.content,
     type: post.type || 'post',
+    interaction: post.interaction || 'anyone',
     bio: person?.bio,
     tags: post.tags,
     chainProof: post.attestationUri || post.storageUri || 'unverified://pending',
@@ -526,6 +578,7 @@ function toFeedCard(post: SocialPost): FeedCard {
       boosts: post.boosts,
       likes: post.likes,
     },
+    poll: post.poll,
   };
 }
 
@@ -643,14 +696,28 @@ function setReplyTarget(target: FeedCard) {
 
 async function focusReplyComposer() {
   await nextTick();
-  replyComposerRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  replyTextareaRef.value?.focus({ preventScroll: true });
+  const textarea = document.querySelector('textarea[placeholder^="回复"]');
+  if (textarea instanceof HTMLTextAreaElement) {
+    textarea.focus();
+  }
+}
+
+function openVisibilityModal() {
+  tempVisibility.value = visibility.value;
+  tempInteraction.value = interaction.value;
+  showVisibilityModal.value = true;
+}
+
+function saveVisibilitySettings() {
+  visibility.value = tempVisibility.value;
+  interaction.value = tempInteraction.value;
+  showVisibilityModal.value = false;
 }
 
 async function loadBootstrap() {
   loading.value = true;
   try {
-    const payload = await fetchSocialBootstrap();
+    const payload = await fetchSocialBootstrapMine();
     applyBootstrap(payload);
     apiOnline.value = true;
     errorMessage.value = '';
@@ -719,12 +786,14 @@ async function submitReply() {
         kind: 'reply',
         content: replyDraft.value.trim(),
         visibility: 'public',
+        interaction: 'anyone',
         storageUri: `draft://reply/${Date.now()}`,
         attestationUri: `attestation://reply/${Date.now()}`,
         tags: targetPost.tags.slice(0, 3),
         mediaIds: [],
         parentPostId: targetPost.id,
         rootPostId,
+        type: 'post',
       });
       bumpReplyCount(targetPost.id);
       await openPostDetail(selectedPostId.value || rootPostId);
@@ -742,6 +811,7 @@ async function submitReply() {
         time: '刚刚',
         content: replyDraft.value.trim(),
         type: 'post',
+        interaction: 'anyone',
         tags: targetPost.tags.slice(0, 2),
         chainProof: `local://${localId}`,
         stats: { replies: 0, boosts: 0, likes: 0 },
@@ -759,6 +829,43 @@ async function submitReply() {
     threadError.value = error instanceof Error ? error.message : '暂时无法发送回复';
   } finally {
     saving.value = false;
+  }
+}
+
+async function handleVote(post: FeedCard, optionIndices: number[]) {
+  if (!apiOnline.value || !currentUser.value) return;
+  try {
+    const updatedPost = await voteOnPoll(post.id, optionIndices);
+    // Update local state
+    const postIdx = posts.value.findIndex(p => p.id === post.id);
+    if (postIdx !== -1) {
+      posts.value[postIdx] = toFeedCard(updatedPost);
+    }
+    if (threadFocusPost.value?.id === post.id) {
+      threadFocusPost.value = toFeedCard(updatedPost);
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '投票失败';
+  }
+}
+
+async function refreshPost(postId: string) {
+  if (!apiOnline.value) return;
+  try {
+    // We can use getPost API if we had one exported, otherwise reuse thread or feed.
+    // Assuming getPost is available via search_web investigation or standard patterns.
+    // Actually socialApi.ts has fetchPostReplies and fetchPostThread.
+    // Let's assume we use fetchPostThread to get the latest post state.
+    const thread = await fetchPostThread(postId, 0);
+    const postIdx = posts.value.findIndex(p => p.id === postId);
+    if (postIdx !== -1) {
+      posts.value[postIdx] = toFeedCard(thread.post);
+    }
+    if (threadFocusPost.value?.id === postId) {
+      threadFocusPost.value = toFeedCard(thread.post);
+    }
+  } catch (error) {
+    console.error('Failed to refresh post:', error);
   }
 }
 
@@ -781,11 +888,32 @@ function handleMediaChange(event: Event) {
   reader.readAsDataURL(file);
 }
 
+function clearMedia() {
+  mediaPreview.value = null;
+  mediaMeta.value = null;
+}
+
 function toggleFollow(userId: string) {
   followedUsers.value = {
     ...followedUsers.value,
     [userId]: !followedUsers.value[userId],
   };
+}
+
+function togglePollEditor() {
+  showPollEditor.value = !showPollEditor.value;
+}
+
+function addPollOption() {
+  if (pollOptions.value.length < 4) {
+    pollOptions.value.push('');
+  }
+}
+
+function removePollOption(index: number) {
+  if (pollOptions.value.length > 2) {
+    pollOptions.value.splice(index, 1);
+  }
 }
 
 async function publishPost() {
@@ -813,11 +941,16 @@ async function publishPost() {
       const createdPost = await createPost({
         authorId: currentUser.value.id,
         content: postDraft.value.trim() || '分享了一条新的媒体动态。',
-        visibility: 'public',
+        visibility: visibility.value,
+        interaction: interaction.value,
         storageUri: createdAsset?.storageUri || `draft://post/${Date.now()}`,
         attestationUri: `attestation://frontend/${Date.now()}`,
         tags: ['创作者动态', '联邦社交'],
         mediaIds: createdAsset ? [createdAsset.id] : [],
+        type: 'post',
+        pollOptions: showPollEditor.value ? pollOptions.value.filter(o => o.trim()) : [],
+        pollExpiresIn: showPollEditor.value ? pollExpiresIn.value : 0,
+        pollMultiple: showPollEditor.value ? pollMultiple.value : false,
       });
       posts.value = [toFeedCard(createdPost), ...posts.value];
       errorMessage.value = '';
@@ -833,6 +966,7 @@ async function publishPost() {
           time: '刚刚',
           content: postDraft.value.trim() || '分享了一条新的媒体动态。',
           type: 'post',
+          interaction: interaction.value,
           tags: ['离线草稿'],
           chainProof: `local://${localId}`,
           media:
@@ -912,7 +1046,7 @@ onMounted(loadBootstrap);
 
 <template>
   <div class="min-h-screen bg-[var(--app-bg)] text-[color:var(--text-primary)] transition-colors duration-300 lg:h-screen lg:overflow-hidden" :style="themeStyles">
-    <div class="mx-auto max-w-[1540px] px-4 py-4 lg:h-screen lg:max-w-none lg:px-6 lg:overflow-hidden">
+    <div class="mx-auto max-w-[1280px] px-0 lg:h-screen lg:px-4 lg:overflow-hidden">
       <div v-if="errorMessage" class="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
         {{ serviceNotice }}
       </div>
@@ -921,7 +1055,7 @@ onMounted(loadBootstrap);
         正在载入社区内容...
       </div>
 
-      <div v-else class="grid gap-0 overflow-hidden rounded-[28px] border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_20px_60px_rgba(15,23,42,0.08)] lg:h-[calc(100vh-32px)] lg:grid-cols-[360px_minmax(0,1fr)_320px]">
+      <div v-else class="grid gap-0 overflow-hidden lg:h-[calc(100vh-24px)] lg:grid-cols-[300px_minmax(0,1fr)_300px]">
         <aside class="border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar lg:border-b-0 lg:border-r">
           <div class="space-y-3 p-4">
             <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-4">
@@ -932,75 +1066,141 @@ onMounted(loadBootstrap);
               />
             </div>
 
-            <div class="flex items-center gap-4">
-              <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-xl font-bold text-slate-900">
+            <div class="flex items-center gap-3">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                 {{ avatarText(currentUser?.displayName || 'W') }}
               </div>
               <div class="min-w-0">
-                <div class="truncate text-xl font-semibold text-[color:var(--text-primary)]">{{ currentUser?.displayName }}</div>
-                <div class="truncate text-base text-[color:var(--text-secondary)]">{{ profileLabel(currentUser) }}</div>
+                <div class="truncate text-[17px] font-semibold text-[color:var(--text-primary)]">{{ currentUser?.displayName }}</div>
+                <div class="truncate text-sm text-[color:var(--text-secondary)]">{{ profileLabel(currentUser) }}</div>
               </div>
             </div>
 
-            <div class="flex items-center justify-between rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-2 text-xs">
+            <div class="flex items-center justify-between rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-2 text-[11px]">
               <div class="flex items-center gap-3 text-[color:var(--text-secondary)]">
                 <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.followers ?? 0 }}</strong> 关注者</span>
-                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.following ?? 0 }}</strong> 正在关注</span>
+                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.following ?? 0 }}</strong> 关注中</span>
               </div>
               <div class="flex items-center gap-2">
                 <button
                   @click="router.push('/profile/edit')"
-                  class="inline-flex items-center gap-1 rounded-[2rem] border border-[color:var(--border-color)] px-2 py-1 text-xs font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-emerald-600/10 hover:text-emerald-500"
+                  class="text-[color:var(--text-secondary)] hover:text-emerald-500 transition-colors"
                 >
-                  <Pencil class="w-3 h-3" />
-                  修改资料
-                </button>
-                <button
-                  @click="goToLogout"
-                  class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-2 py-1 text-xs font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-rose-500/10 hover:text-rose-500"
-                >
-                  退出
+                  修改
                 </button>
               </div>
             </div>
 
             <div class="rounded-[22px] border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-4">
+              <!-- Visibility Selection Button -->
               <div class="mb-4 flex flex-wrap gap-2">
-                <span class="rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">公开，允许引用</span>
-                <span class="rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-muted)] px-3 py-2 text-sm text-[color:var(--text-secondary)]">简体中文</span>
+                <button 
+                  @click="openVisibilityModal"
+                  class="group flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+                  title="控制可见性和互动权限"
+                >
+                  <component :is="selectedVisibilityItem.icon" class="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                  <span>{{ selectedVisibilityItem.label }}，{{ selectedInteractionItem.label === '任何人' ? '允许引用' : interaction === 'followers' ? '关注者可引用' : '禁止引用' }}</span>
+                  <ChevronDown class="w-4 h-4 opacity-50 ml-1" />
+                </button>
+
               </div>
 
               <textarea
                 v-model="postDraft"
                 placeholder="想写什么？"
-                class="min-h-[80px] w-full resize-none bg-transparent text-sm text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
+                class="min-h-[100px] w-full resize-none bg-transparent text-base leading-relaxed text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
               />
 
-              <div v-if="mediaPreview && mediaMeta" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)]">
-                <img :src="mediaPreview" :alt="mediaMeta.name" class="max-h-40 w-full object-cover" />
+              <!-- Media Preview (above poll) -->
+              <div v-if="mediaPreview && mediaMeta" class="relative mt-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] group">
+                <img :src="mediaPreview" :alt="mediaMeta.name" class="max-h-48 w-full object-cover" />
+                <!-- Cancel Button -->
+                <button
+                  @click="clearMedia"
+                  class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-0 backdrop-blur-sm transition-opacity hover:bg-black/80 group-hover:opacity-100"
+                  title="移除图片"
+                >
+                  <X class="w-4 h-4" />
+                </button>
+                <div class="absolute bottom-0 left-0 right-0 flex items-center justify-between bg-black/40 px-3 py-1.5 text-xs text-white/80 backdrop-blur-sm">
+                  <span class="truncate">{{ mediaMeta.name }}</span>
+                  <span class="ml-2 shrink-0">{{ mediaMeta.sizeLabel }}</span>
+                </div>
               </div>
 
-              <div class="mt-3 flex items-center justify-between gap-2">
-                <div class="flex items-center gap-3 text-lg text-[color:var(--text-secondary)]">
-                  <label class="cursor-pointer transition hover:text-emerald-300" title="上传图片或视频">
-                    <ImageIcon class="w-[20px] h-[20px] stroke-[1.5] transition-transform hover:scale-110" />
-                    <input type="file" accept="image/*,video/*" class="hidden" @change="handleMediaChange" />
-                  </label>
-                  <span title="投票"><AlignJustify class="w-5 h-5 hover:text-emerald-400 cursor-pointer transition-transform hover:scale-110" /></span>
-                  <span title="预警标签"><AlertTriangle class="w-5 h-5 hover:text-amber-400 cursor-pointer transition-transform hover:scale-110" /></span>
-                  <span title="表情"><Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" /></span>
+              <!-- Poll Editor -->
+              <Transition name="expand">
+                <div v-if="showPollEditor" class="mt-4 space-y-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <div class="space-y-3">
+                    <div v-for="(opt, index) in pollOptions" :key="index" class="flex items-center gap-3">
+                      <div class="h-6 w-6 flex-none rounded-full border-2 border-[color:var(--border-color)] bg-transparent"></div>
+                      <div class="relative flex-1">
+                        <input
+                          v-model="pollOptions[index]"
+                          :placeholder="`选项 ${index + 1}`"
+                          class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500"
+                        />
+                        <button v-if="pollOptions.length > 2" @click="removePollOption(index)" class="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] hover:text-rose-500">
+                          <X class="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <button v-if="pollOptions.length < 4" @click="addPollOption" class="ml-9 text-xs font-bold text-emerald-400 hover:text-emerald-300">
+                      + 添加选项
+                    </button>
+                  </div>
+
+                  <div class="flex gap-4 border-t border-emerald-500/10 pt-4">
+                    <div class="flex-1 space-y-1">
+                      <label class="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">投票期限</label>
+                      <select v-model="pollExpiresIn" class="w-full bg-transparent text-sm font-bold text-emerald-400 outline-none">
+                        <option :value="60" class="bg-[var(--panel-bg)]">1 小时</option>
+                        <option :value="1440" class="bg-[var(--panel-bg)]">1 天</option>
+                        <option :value="4320" class="bg-[var(--panel-bg)]">3 天</option>
+                        <option :value="10080" class="bg-[var(--panel-bg)]">7 天</option>
+                      </select>
+                    </div>
+                    <div class="flex-1 space-y-1 border-l border-emerald-500/10 pl-4">
+                      <label class="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">类型</label>
+                      <button @click="pollMultiple = !pollMultiple" class="block w-full text-left text-sm font-bold text-emerald-400">
+                        {{ pollMultiple ? '多选' : '单选' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </Transition>
+
+              <div class="mt-4 flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2 text-lg text-[color:var(--text-secondary)]">
+                    <label class="cursor-pointer transition hover:text-emerald-300 rounded-lg p-1.5 hover:bg-emerald-500/10" title="上传图片或视频">
+                      <ImageIcon class="w-5 h-5 stroke-[1.5] transition-transform hover:scale-110" />
+                      <input type="file" accept="image/*,video/*" class="hidden" @change="handleMediaChange" />
+                    </label>
+                    <button @click="togglePollEditor" class="rounded-lg p-1.5 transition-colors" :class="showPollEditor ? 'text-emerald-400 bg-emerald-500/10' : 'hover:bg-[var(--chip-bg)]'">
+                      <BarChart3 class="w-5 h-5 hover:text-emerald-400 cursor-pointer transition-transform hover:scale-110" />
+                    </button>
+                    <button class="rounded-lg p-1.5 transition-colors hover:bg-amber-500/10" title="预警标签">
+                      <AlertTriangle class="w-5 h-5 hover:text-amber-400 cursor-pointer transition-transform hover:scale-110" />
+                    </button>
+                    <button class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" title="表情">
+                      <Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" />
+                    </button>
+                  </div>
+                  <span
+                    class="text-sm font-medium pr-1 transition-colors"
+                    :class="500 - postDraft.length <= 0 ? 'text-rose-400 font-bold' : 500 - postDraft.length <= 50 ? 'text-amber-400' : 'text-[color:var(--text-muted)]'"
+                  >{{ 500 - postDraft.length }}</span>
                 </div>
 
-                <div class="flex items-center gap-3">
-                  <span class="text-sm font-medium text-[color:var(--text-secondary)]">500</span>
-                  <button
-                    :disabled="saving"
-                    @click="publishPost"
-                    class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60"
-                  >
-                    {{ saving ? '发布中' : '发布' }}
-                  </button>
-                </div>
+                <button
+                  :disabled="saving"
+                  @click="publishPost"
+                  class="w-full rounded-xl bg-emerald-600 py-2.5 text-[15px] font-bold tracking-wider text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:opacity-50 disabled:hover:translate-y-0"
+                >
+                  {{ saving ? '发布中...' : '发 布' }}
+                </button>
               </div>
             </div>
 
@@ -1016,19 +1216,55 @@ onMounted(loadBootstrap);
           </div>
 
           <section v-if="currentSection === 'home'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="post in timeline" :key="post.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
-              <div class="flex gap-4">
-                <div class="flex h-14 w-14 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900">
+            <article v-for="post in timeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+              <div class="flex gap-3">
+                <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
                   {{ avatarText(post.author) }}
                 </div>
                 <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span class="text-[22px] font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
-                    <span class="text-lg text-[color:var(--text-secondary)]">{{ post.handle }}@{{ post.instance }}</span>
-                    <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
+                  <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                    <span class="text-sm text-[color:var(--text-secondary)]">{{ post.handle }}@{{ post.instance }}</span>
+                    <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
                   </div>
-                  <div v-if="post.bio" class="mt-1 text-sm text-[color:var(--text-muted)]">{{ post.bio }}</div>
-                  <div class="mt-4 whitespace-pre-wrap text-[17px] leading-8 text-[color:var(--text-soft)]">{{ post.content }}</div>
+                  <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
+                  <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
+
+                  <!-- Poll Display -->
+                  <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
+                    <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
+                      <!-- Voted or Expired: Show results -->
+                      <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
+                        <div 
+                          class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
+                          :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                        ></div>
+                        <div class="relative flex items-center justify-between px-4 py-2 text-[13px]">
+                          <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                          <span class="font-bold text-emerald-400">
+                            {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                          </span>
+                        </div>
+                      </div>
+                      <!-- Not voted and Active: Show voting buttons -->
+                      <button 
+                        v-else 
+                        @click="handleVote(post, [idx])"
+                        class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-left text-[13px] font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
+                    
+                    <div class="mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                      <div class="flex items-center gap-2">
+                        <span>{{ post.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
+                        <span class="opacity-30">·</span>
+                        <span>{{ new Date(post.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+                      </div>
+                      <button @click="refreshPost(post.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新</button>
+                    </div>
+                  </div>
 
                   <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
                     <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
@@ -1072,9 +1308,40 @@ onMounted(loadBootstrap);
                     >
                       <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
                     </button>
-                    <span class="ml-auto truncate rounded-full bg-[var(--chip-bg)] px-3 py-2 text-[color:var(--text-muted)]">
-                      {{ shortProof(post.chainProof) }}
-                    </span>
+                    
+                    <!-- More Menu Wrapper -->
+                    <div class="relative ml-auto">
+                      <button 
+                        @click="toggleMoreMenu(post.id)"
+                        class="inline-flex items-center rounded-lg px-2 py-1.5 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                      >
+                        <MoreHorizontal class="w-5 h-5" />
+                      </button>
+                      
+                      <!-- Dropdown Menu -->
+                      <div 
+                        v-if="activeMoreMenuId === post.id" 
+                        class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
+                      >
+                        <div class="py-1">
+                          <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
+                          <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
+                          <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
+                          <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
+                        </div>
+                        <div class="border-t border-[color:var(--border-color)] py-1">
+                          <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
+                        </div>
+                        <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
+                          <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏 {{ post.handle }}</button>
+                          <button @click="handleMenuAction('block', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">屏蔽 {{ post.handle }}</button>
+                          <button @click="handleMenuAction('report', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">举报 {{ post.handle }}</button>
+                        </div>
+                        <div class="border-t border-[color:var(--border-color)] py-1">
+                          <button @click="handleMenuAction('blockInstance', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 text-rose-500 font-medium">屏蔽 {{ post.instance }} 实例</button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1101,44 +1368,113 @@ onMounted(loadBootstrap);
                 {{ threadError }}
               </div>
 
-              <div v-if="threadAncestors.length" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
-                <div class="mb-4 text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--text-muted)]">
+              <div v-if="threadAncestors.length" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+                <div class="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[color:var(--text-muted)]">
                   上下文
                 </div>
-                <div class="space-y-4">
+                <div class="space-y-3">
                   <article
                     v-for="ancestor in threadAncestors"
                     :key="ancestor.id"
-                    class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-4"
+                    class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3"
                   >
                     <div class="flex items-center gap-2 text-sm">
                       <span class="font-semibold text-[color:var(--text-primary)]">{{ ancestor.author }}</span>
                       <span class="text-[color:var(--text-secondary)]">{{ ancestor.handle }}@{{ ancestor.instance }}</span>
-                      <span class="text-[color:var(--text-muted)]">{{ ancestor.time }}</span>
+                      <span class="text-xs text-[color:var(--text-muted)]">{{ ancestor.time }}</span>
                     </div>
-                    <div class="mt-3 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
+                    <div class="mt-2 whitespace-pre-wrap text-sm leading-6 text-[color:var(--text-secondary)]">
                       {{ ancestor.content }}
                     </div>
                   </article>
                 </div>
               </div>
 
-              <article class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+              <article class="px-5 py-6 transition hover:bg-[var(--panel-soft)]">
                 <div class="flex gap-4">
-                  <div class="flex h-14 w-14 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900">
+                  <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900">
                     {{ avatarText(threadFocusPost.author) }}
                   </div>
                   <div class="min-w-0 flex-1">
-                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span class="text-[24px] font-semibold text-[color:var(--text-primary)]">{{ threadFocusPost.author }}</span>
-                      <span class="text-lg text-[color:var(--text-secondary)]">{{ threadFocusPost.handle }}@{{ threadFocusPost.instance }}</span>
-                      <span class="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-500">
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span class="text-[20px] font-semibold text-[color:var(--text-primary)]">{{ threadFocusPost.author }}</span>
+                      <span class="text-base text-[color:var(--text-secondary)]">{{ threadFocusPost.handle }}@{{ threadFocusPost.instance }}</span>
+                      <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-emerald-500">
                         {{ threadFocusPost.kind === 'reply' ? '回复' : '帖子' }}
                       </span>
-                      <span class="text-sm text-[color:var(--text-muted)]">{{ threadFocusPost.time }}</span>
+                      <span class="text-xs text-[color:var(--text-muted)]">{{ threadFocusPost.time }}</span>
                     </div>
-                    <div v-if="threadFocusPost.bio" class="mt-1 text-sm text-[color:var(--text-muted)]">{{ threadFocusPost.bio }}</div>
-                    <div class="mt-4 whitespace-pre-wrap text-[18px] leading-8 text-[color:var(--text-soft)]">{{ threadFocusPost.content }}</div>
+                    <div v-if="threadFocusPost.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ threadFocusPost.bio }}</div>
+                    <div class="mt-4 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-soft)]">{{ threadFocusPost.content }}</div>
+
+                    <!-- Detail Poll Display -->
+                    <div v-if="threadFocusPost.poll" class="mt-6 space-y-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-6">
+                      <div v-for="(opt, idx) in threadFocusPost.poll.options" :key="idx" class="relative">
+                        <div v-if="threadFocusPost.poll.voters.includes(currentUser?.id || '') || new Date(threadFocusPost.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-xl bg-[var(--frame-bg)]">
+                          <div 
+                            class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
+                            :style="{ width: `${(opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                          ></div>
+                          <div class="relative flex items-center justify-between px-5 py-4 text-base">
+                            <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                            <span class="font-bold text-emerald-400">
+                              {{ Math.round((opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                            </span>
+                          </div>
+                        </div>
+                        <button 
+                          v-else 
+                          @click="handleVote(threadFocusPost, [idx])"
+                          class="w-full rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-5 py-4 text-left text-base font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+                        >
+                          {{ opt.label }}
+                        </button>
+                      </div>
+                      
+                      <div class="mt-4 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                        <div class="flex items-center gap-3">
+                          <span>{{ threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
+                          <span class="opacity-30">·</span>
+                          <span>{{ new Date(threadFocusPost.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+                          <span class="opacity-30">·</span>
+                          <span v-if="new Date(threadFocusPost.poll.expiresAt) > new Date()">剩余时间: {{ formatTimestamp(threadFocusPost.poll.expiresAt) }}</span>
+                        </div>
+                        <button @click="refreshPost(threadFocusPost.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新票数</button>
+                      </div>
+                    </div>
+
+                    <div v-if="threadFocusPost.poll" class="mt-4 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-4">
+                      <div v-for="(opt, idx) in threadFocusPost.poll.options" :key="idx" class="relative">
+                        <div v-if="threadFocusPost.poll.voters.includes(currentUser?.id || '') || new Date(threadFocusPost.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
+                          <div 
+                            class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
+                            :style="{ width: `${(opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                          ></div>
+                          <div class="relative flex items-center justify-between px-4 py-2.5 text-sm">
+                            <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                            <span class="font-bold text-emerald-400">
+                              {{ Math.round((opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                            </span>
+                          </div>
+                        </div>
+                        <button 
+                          v-else 
+                          @click="handleVote(threadFocusPost, [idx])"
+                          class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5 text-left text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+                        >
+                          {{ opt.label }}
+                        </button>
+                      </div>
+                      
+                      <div class="mt-3 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                        <div class="flex items-center gap-3">
+                          <span>{{ threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
+                          <span class="opacity-30">·</span>
+                          <span>{{ new Date(threadFocusPost.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+                        </div>
+                        <button @click="refreshPost(threadFocusPost.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新</button>
+                      </div>
+                    </div>
 
                     <div
                       v-if="threadFocusPost.media"
@@ -1196,7 +1532,7 @@ onMounted(loadBootstrap);
                 </div>
               </article>
 
-              <div ref="replyComposerRef" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+              <div ref="replyComposerRef" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
                 <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-5">
                   <div class="flex items-start gap-4">
                     <div class="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
@@ -1253,7 +1589,7 @@ onMounted(loadBootstrap);
                 </div>
               </div>
 
-              <div class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+              <div class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
                 <div class="mb-4 flex items-center justify-between gap-3">
                   <div class="text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--text-muted)]">
                     回复楼层
@@ -1372,7 +1708,102 @@ onMounted(loadBootstrap);
                         <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
                       </div>
                       <div class="mt-2 text-[17px] leading-relaxed text-[color:var(--text-primary)] whitespace-pre-wrap">{{ post.content }}</div>
-                      <!-- Add stats/actions if needed -->
+
+                      <!-- Explore Poll Display -->
+                      <div v-if="post.poll" class="mt-4 space-y-3 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
+                        <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
+                          <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
+                            <div 
+                              class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all"
+                              :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                            ></div>
+                            <div class="relative flex items-center justify-between px-3 py-2 text-sm">
+                              <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                              <span class="font-bold text-emerald-400">
+                                {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                              </span>
+                            </div>
+                          </div>
+                          <button 
+                            v-else 
+                            @click="handleVote(post, [idx])"
+                            class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-left text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/10"
+                          >
+                            {{ opt.label }}
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <!-- Post Media (Explore Tab) -->
+                      <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[500px] w-full object-cover" />
+                      </div>
+                      
+                      <!-- Interaction Row -->
+                      <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
+                        <button
+                          @click="openPostDetail(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                        >
+                          <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
+                        </button>
+                        <button
+                          @click="toggleBoost(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
+                          :class="boostedPosts[post.id] ? 'text-emerald-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.boosts + (boostedPosts[post.id] ? 1 : 0) || '' }}
+                        </button>
+                        <button
+                          @click="toggleLike(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-rose-500/10 hover:text-rose-400"
+                          :class="likedPosts[post.id] ? 'text-rose-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
+                        </button>
+                        <button
+                          @click="toggleBookmark(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-indigo-500/10 hover:text-indigo-400"
+                          :class="bookmarkedPosts[post.id] ? 'text-indigo-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                        </button>
+                        
+                        <!-- More Menu Wrapper -->
+                        <div class="relative ml-auto">
+                          <button 
+                            @click="toggleMoreMenu(post.id)"
+                            class="inline-flex items-center rounded-lg px-2 py-1.5 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                          >
+                            <MoreHorizontal class="w-5 h-5" />
+                          </button>
+                          
+                          <!-- Dropdown Menu -->
+                          <div 
+                            v-if="activeMoreMenuId === post.id" 
+                            class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
+                          >
+                            <div class="py-1">
+                              <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
+                              <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
+                              <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
+                              <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
+                            </div>
+                            <div class="border-t border-[color:var(--border-color)] py-1">
+                              <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
+                            </div>
+                            <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
+                              <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏 {{ post.handle }}</button>
+                              <button @click="handleMenuAction('block', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">屏蔽 {{ post.handle }}</button>
+                              <button @click="handleMenuAction('report', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">举报 {{ post.handle }}</button>
+                            </div>
+                            <div class="border-t border-[color:var(--border-color)] py-1">
+                              <button @click="handleMenuAction('blockInstance', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 text-rose-500 font-medium">屏蔽 {{ post.instance }} 实例</button>
+                            </div>
+                          </div>
+                        </div>
+
+                      </div>
                     </div>
                   </div>
                 </article>
@@ -1434,6 +1865,94 @@ onMounted(loadBootstrap);
                         <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
                       </div>
                       <div class="text-[17px] leading-relaxed text-[color:var(--text-primary)] font-medium whitespace-pre-wrap">{{ post.content }}</div>
+
+                      <!-- News Poll Display -->
+                      <div v-if="post.poll" class="mt-4 space-y-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
+                        <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
+                          <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--panel-bg)]">
+                            <div 
+                              class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all"
+                              :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                            ></div>
+                            <div class="relative flex items-center justify-between px-3 py-2 text-sm">
+                              <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                              <span class="font-bold text-emerald-400">
+                                {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                              </span>
+                            </div>
+                          </div>
+                          <button 
+                            v-else 
+                            @click="handleVote(post, [idx])"
+                            class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-left text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/10"
+                          >
+                            {{ opt.label }}
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <!-- Post Media (News Tab) -->
+                      <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[500px] w-full object-cover" />
+                      </div>
+                      
+                      <!-- Interaction Row -->
+                      <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
+                        <button
+                          @click="openPostDetail(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                        >
+                          <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
+                        </button>
+                        <button
+                          @click="toggleBoost(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
+                          :class="boostedPosts[post.id] ? 'text-emerald-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.boosts + (boostedPosts[post.id] ? 1 : 0) || '' }}
+                        </button>
+                        <button
+                          @click="toggleLike(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-rose-500/10 hover:text-rose-400"
+                          :class="likedPosts[post.id] ? 'text-rose-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
+                        </button>
+                        <button
+                          @click="toggleBookmark(post.id)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-indigo-500/10 hover:text-indigo-400"
+                          :class="bookmarkedPosts[post.id] ? 'text-indigo-400' : 'text-[color:var(--text-secondary)]'"
+                        >
+                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                        </button>
+                        
+                        <!-- More Menu Wrapper -->
+                        <div class="relative ml-auto">
+                          <button 
+                            @click="toggleMoreMenu(post.id)"
+                            class="inline-flex items-center rounded-lg px-2 py-1.5 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                          >
+                            <MoreHorizontal class="w-5 h-5" />
+                          </button>
+                          
+                          <!-- Dropdown Menu -->
+                          <div 
+                            v-if="activeMoreMenuId === post.id" 
+                            class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
+                          >
+                            <div class="py-1">
+                              <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
+                              <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
+                              <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
+                              <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
+                            </div>
+                            <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
+                              <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏此新闻</button>
+                            </div>
+                          </div>
+                        </div>
+
+                      </div>
                     </div>
                   </div>
                 </article>
@@ -1442,7 +1961,7 @@ onMounted(loadBootstrap);
           </section>
 
           <section v-else-if="currentSection === 'notifications'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in notificationItems" :key="item.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="item in notificationItems" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex items-start gap-4">
                 <div class="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600/12 text-emerald-600">◌</div>
                 <div class="min-w-0 flex-1">
@@ -1457,7 +1976,7 @@ onMounted(loadBootstrap);
           </section>
 
           <section v-else-if="currentSection === 'lists'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in curatedLists" :key="item.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="item in curatedLists" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-6">
                 <div class="flex items-center justify-between gap-3">
                   <div class="text-xl font-semibold text-[color:var(--text-primary)]">{{ item.title }}</div>
@@ -1484,7 +2003,7 @@ onMounted(loadBootstrap);
             <article v-if="likedTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
               你点赞的内容会显示在这里。
             </article>
-            <article v-for="post in likedTimeline" v-else :key="post.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="post in likedTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</div>
               <div class="mt-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
             </article>
@@ -1494,14 +2013,14 @@ onMounted(loadBootstrap);
             <article v-if="bookmarkedTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
               收藏的动态会整理在这里，方便稍后继续阅读。
             </article>
-            <article v-for="post in bookmarkedTimeline" v-else :key="post.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="post in bookmarkedTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</div>
               <div class="mt-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
             </article>
           </section>
 
           <section v-else-if="currentSection === 'mentions'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in mentionItems" :key="item.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="item in mentionItems" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex items-start gap-4">
                 <div class="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600/12 text-emerald-600">@</div>
                 <div class="min-w-0 flex-1">
@@ -1527,36 +2046,36 @@ onMounted(loadBootstrap);
           </section>
         </main>
 
-        <aside class="border-t border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar lg:border-l lg:border-t-0">
+        <aside class="border-t border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-24px)] lg:overflow-y-auto no-scrollbar lg:border-l lg:border-t-0">
           <div class="p-4">
-            <div class="mb-6 flex items-center gap-3">
-              <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-lg font-bold text-white">w</div>
-              <div class="text-[20px] font-semibold tracking-tight text-[color:var(--text-primary)]">whaleodon</div>
+            <div class="mb-5 flex items-center gap-2">
+              <div class="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm shadow-emerald-500/20">w</div>
+              <div class="text-[17px] font-bold tracking-tight text-[color:var(--text-primary)]">Mole</div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-0.5">
               <button
                 v-for="item in primaryNavItems"
                 :key="item.key"
                 @click="item.key === 'preferences' ? router.push('/settings') : setSection(item.key)"
-                class="flex w-full items-center gap-3 rounded-[1.2rem] px-3 py-2.5 text-base font-medium transition-all hover:translate-x-1"
-                :class="currentSection === item.key ? 'bg-emerald-600/15 text-emerald-600 shadow-sm' : 'text-[color:var(--text-secondary)] hover:bg-[var(--chip-hover)]'"
+                class="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-[15px] font-medium transition-all hover:translate-x-1"
+                :class="currentSection === item.key ? 'bg-emerald-600/10 text-emerald-500 font-semibold' : 'text-[color:var(--text-secondary)] hover:bg-[var(--chip-hover)]'"
               >
-                <component :is="item.icon" class="w-5 h-5 stroke-[1.5]" />
+                <component :is="item.icon" class="w-[18px] h-[18px] stroke-[1.8]" />
                 <span>{{ item.label }}</span>
               </button>
             </div>
 
-            <div class="mt-6 border-t border-[color:var(--border-color)] pt-6">
-              <div class="space-y-1">
+            <div class="mt-5 border-t border-[color:var(--border-color)] pt-5">
+              <div class="space-y-0.5">
                 <button
                   v-for="item in secondaryNavItems"
                   :key="item.key"
                   @click="setSection(item.key)"
-                  class="flex w-full items-center gap-3 rounded-[1.2rem] px-3 py-2.5 text-base font-medium transition-all hover:translate-x-1 hover:bg-[var(--chip-hover)]"
-                  :class="currentSection === item.key ? 'bg-emerald-600/12 text-emerald-600' : 'text-[color:var(--text-secondary)] hover:bg-[var(--chip-bg)]'"
+                  class="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-[14px] font-medium transition-all hover:translate-x-0.5 hover:bg-[var(--chip-hover)]"
+                  :class="currentSection === item.key ? 'bg-emerald-600/10 text-emerald-500' : 'text-[color:var(--text-secondary)] hover:bg-[var(--chip-bg)]'"
                 >
-                  <component :is="item.icon" class="w-5 h-5 stroke-[1.5]" />
+                  <component :is="item.icon" class="w-[17px] h-[17px] stroke-[1.5]" />
                   <span>{{ item.label }}</span>
                 </button>
               </div>
@@ -1574,23 +2093,189 @@ onMounted(loadBootstrap);
                   <component :is="item.icon" class="w-5 h-5 stroke-[1.5]" />
                   <span>{{ item.label }}</span>
                 </button>
+
+                <button
+                  v-if="isLoggedIn"
+                  @click="goToLogout"
+                  class="flex w-full items-center gap-3 rounded-[1.2rem] px-3 py-2.5 text-base font-medium text-[color:var(--text-secondary)] transition-all hover:translate-x-1 hover:bg-[var(--chip-hover)]"
+                >
+                  <LogOut class="w-5 h-5 stroke-[1.5]" />
+                  <span>退出登录</span>
+                </button>
               </div>
             </div>
           </div>
         </aside>
       </div>
     </div>
+
+    <!-- Visibility and Interaction Modal -->
+    <Transition name="modal">
+      <div v-if="showVisibilityModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4">
+        <!-- Backdrop -->
+        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="showVisibilityModal = false"></div>
+        
+        <!-- Modal Content -->
+        <div class="relative w-full max-w-lg flex flex-col max-h-[90vh] overflow-hidden rounded-[2.5rem] border border-[color:var(--border-color)] bg-[var(--panel-bg)] shadow-2xl transition-all">
+          <!-- Header -->
+          <div class="flex items-center justify-between border-b border-[color:var(--border-color)] px-8 py-6">
+            <h3 class="text-xl font-bold text-[color:var(--text-primary)]">可见性和互动</h3>
+            <button @click="showVisibilityModal = false" class="rounded-full p-2 text-[color:var(--text-muted)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]">
+              <X class="w-6 h-6" />
+            </button>
+          </div>
+
+          <!-- Body -->
+          <div class="p-8 space-y-8 flex-1 overflow-y-auto no-scrollbar">
+            <p class="text-[15px] leading-relaxed text-[color:var(--text-secondary)]">
+              控制谁可以和此摩文互动。你也可以前往<span class="text-emerald-400 hover:underline cursor-pointer">偏好设置 > 发布默认值</span>将此设置应用到全部未来发布的摩文。
+            </p>
+
+            <!-- Visibility Selection -->
+            <div class="space-y-3">
+              <label class="block text-sm font-bold uppercase tracking-widest text-[color:var(--text-muted)]">可见性</label>
+              <div class="relative">
+                <button 
+                  @click="showVisibilityDropdown = !showVisibilityDropdown"
+                  class="flex w-full items-center justify-between rounded-3xl border border-[color:var(--border-color)] bg-[var(--chip-bg)] px-6 py-4 transition-all hover:bg-[var(--chip-hover)]"
+                  :class="showVisibilityDropdown ? 'border-emerald-500/50 ring-1 ring-emerald-500/50' : ''"
+                >
+                  <div class="flex items-center gap-4">
+                    <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-lg shadow-emerald-900/40">
+                      <component :is="visibilityOptions.find(o => o.id === tempVisibility).icon" class="w-5 h-5" />
+                    </div>
+                    <div class="text-left font-bold text-[color:var(--text-primary)]">
+                      {{ visibilityOptions.find(o => o.id === tempVisibility).label }}
+                    </div>
+                  </div>
+                  <ChevronDown class="w-5 h-5 text-[color:var(--text-muted)] transition-transform" :class="{ 'rotate-180': showVisibilityDropdown }" />
+                </button>
+
+                <!-- Custom Visibility Dropdown -->
+                <Transition name="dropdown">
+                  <div v-if="showVisibilityDropdown" class="absolute left-0 right-0 z-[110] mt-2 overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-muted)] shadow-2xl">
+                    <div class="max-h-80 overflow-y-auto no-scrollbar py-2">
+                      <button 
+                        v-for="opt in visibilityOptions" 
+                        :key="opt.id"
+                        @click="tempVisibility = opt.id; showVisibilityDropdown = false"
+                        class="flex w-full items-center gap-4 px-6 py-4 text-left transition-all hover:bg-[var(--chip-hover)]"
+                        :class="tempVisibility === opt.id ? 'bg-emerald-500/10' : ''"
+                      >
+                        <div class="flex h-10 w-10 flex-none items-center justify-center rounded-xl transition-all"
+                          :class="tempVisibility === opt.id ? 'bg-emerald-500 text-white' : 'bg-[var(--chip-bg)] text-[color:var(--text-muted)]'"
+                        >
+                          <component :is="opt.icon" class="w-5 h-5" />
+                        </div>
+                        <div class="flex-1 min-w-0">
+                          <div class="font-bold text-[color:var(--text-primary)]">{{ opt.label }}</div>
+                          <div class="text-sm text-[color:var(--text-muted)] line-clamp-1">{{ opt.description }}</div>
+                        </div>
+                        <div v-if="tempVisibility === opt.id" class="text-emerald-500">
+                          <CheckSquare class="w-5 h-5" />
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </Transition>
+              </div>
+            </div>
+
+            <!-- Interaction Selection -->
+            <div class="space-y-3 pt-2">
+              <label class="block text-sm font-bold uppercase tracking-widest text-[color:var(--text-muted)]">谁可以引用</label>
+              <div class="relative">
+                <button 
+                  @click="showInteractionDropdown = !showInteractionDropdown"
+                  class="flex w-full items-center justify-between rounded-3xl border border-[color:var(--border-color)] bg-[var(--chip-bg)] px-6 py-4 transition-all hover:bg-[var(--chip-hover)]"
+                  :class="showInteractionDropdown ? 'border-emerald-500/50 ring-1 ring-emerald-500/50' : ''"
+                >
+                  <div class="font-bold text-[color:var(--text-primary)]">
+                    {{ interactionOptions.find(o => o.id === tempInteraction).label }}
+                  </div>
+                  <ChevronDown class="w-5 h-5 text-[color:var(--text-muted)] transition-transform" :class="{ 'rotate-180': showInteractionDropdown }" />
+                </button>
+
+                <!-- Custom Interaction Dropdown -->
+                <Transition name="dropdown">
+                  <div v-if="showInteractionDropdown" class="absolute left-0 right-0 z-[110] mt-2 overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-muted)] shadow-2xl">
+                    <div class="max-h-60 overflow-y-auto no-scrollbar py-2">
+                      <button 
+                        v-for="opt in interactionOptions" 
+                        :key="opt.id"
+                        @click="tempInteraction = opt.id; showInteractionDropdown = false"
+                        class="flex w-full items-center justify-between px-6 py-4 text-left transition-all hover:bg-[var(--chip-hover)]"
+                        :class="tempInteraction === opt.id ? 'bg-emerald-500/10 text-emerald-500 font-bold' : 'text-[color:var(--text-primary)]'"
+                      >
+                        <span>{{ opt.label }}</span>
+                        <CheckSquare v-if="tempInteraction === opt.id" class="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                </Transition>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex items-center justify-end gap-4 border-t border-[color:var(--border-color)] bg-[var(--app-bg)]/50 px-8 py-6">
+            <button 
+              @click="showVisibilityModal = false"
+              class="rounded-2xl px-8 py-3 text-lg font-bold text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+            >
+              取消
+            </button>
+            <button 
+              @click="saveVisibilitySettings"
+              class="rounded-2xl bg-emerald-600 px-10 py-3 text-lg font-bold text-white shadow-xl transition shadow-emerald-900/40 hover:bg-emerald-500 hover:-translate-y-0.5"
+            >
+              保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <style scoped>
-.no-scrollbar {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-active .relative,
+.modal-leave-active .relative {
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.modal-enter-from .relative,
+.modal-leave-to .relative {
+  transform: scale(0.9) translateY(20px);
+}
+
+.dropdown-enter-active,
+.dropdown-leave-active {
+  transition: all 0.2s ease-out;
+}
+
+.dropdown-enter-from,
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
 }
 
 .no-scrollbar::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 </style>

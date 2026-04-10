@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -15,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -165,7 +168,42 @@ func (a *App) registerLegacyRoutes(r *mux.Router) {
 	r.HandleFunc("/relay/reward", a.rewardHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/relay/stats", a.relayStatsHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/admin/check-access", a.checkAdminAccessHandler).Methods(http.MethodGet, http.MethodOptions)
+	r.HandleFunc("/api/admin/social/reset", a.adminSocialResetHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/analytics/distribution", a.distributionHandler).Methods(http.MethodGet, http.MethodOptions)
+}
+
+func (a *App) isAdminRequest(r *http.Request) bool {
+	allow := strings.TrimSpace(os.Getenv("ADMIN_WALLETS"))
+	if allow == "" {
+		return false
+	}
+
+	addr := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Admin-Wallet")))
+	if addr == "" {
+		addr = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("address")))
+	}
+	if addr == "" {
+		return false
+	}
+
+	for _, item := range strings.Split(allow, ",") {
+		if strings.ToLower(strings.TrimSpace(item)) == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) adminSocialResetHandler(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "admin access required"})
+		return
+	}
+
+	seedRaw := strings.TrimSpace(r.URL.Query().Get("seed"))
+	seed := seedRaw == "1" || strings.EqualFold(seedRaw, "true") || strings.EqualFold(seedRaw, "yes") || strings.EqualFold(seedRaw, "on")
+	a.social.Reset(seed)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "seed": seed, "socialStats": a.social.Stats()})
 }
 
 func (a *App) registerSocialRoutes(r *mux.Router) {
@@ -177,6 +215,7 @@ func (a *App) registerSocialRoutes(r *mux.Router) {
 	r.HandleFunc("/api/v1/social/users/{id}", a.updateUserHandler).Methods(http.MethodPatch, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/feed", a.feedHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts", a.createPostHandler).Methods(http.MethodPost, http.MethodOptions)
+	r.HandleFunc("/api/v1/social/posts/{id}/poll/vote", a.votePollHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts/{id}", a.getPostHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts/{id}/thread", a.getPostThreadHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts/{id}/replies", a.listPostRepliesHandler).Methods(http.MethodGet, http.MethodOptions)
@@ -373,6 +412,77 @@ func (a *App) executeMint(to string) (string, error) {
 	}
 
 	relayer.Nonce++
+	return signed.Hash().Hex(), nil
+}
+
+func (a *App) executePostAttestation(storageURI string) (string, error) {
+	if a.client == nil || a.chainID == nil {
+		return "", errors.New("rpc not configured")
+	}
+
+	contractAddr := strings.TrimSpace(os.Getenv("POST_ATTEST_CONTRACT"))
+	privRaw := strings.TrimSpace(os.Getenv("POST_ATTEST_PRIVATE_KEY"))
+	if contractAddr == "" || privRaw == "" {
+		return "", errors.New("post attestation not configured")
+	}
+
+	const prefix = "sha256://"
+	if !strings.HasPrefix(storageURI, prefix) {
+		return "", errors.New("storageURI must be sha256://...")
+	}
+	hashHex := strings.TrimPrefix(storageURI, prefix)
+	hashBytes, err := hex.DecodeString(hashHex)
+	if err != nil || len(hashBytes) != 32 {
+		return "", errors.New("invalid sha256 digest")
+	}
+
+	priv, err := crypto.HexToECDSA(strings.TrimPrefix(privRaw, "0x"))
+	if err != nil {
+		return "", err
+	}
+	from := crypto.PubkeyToAddress(priv.PublicKey)
+	nonce, err := a.client.PendingNonceAt(a.ctx, from)
+	if err != nil {
+		return "", err
+	}
+
+	gasPrice, err := a.client.SuggestGasPrice(a.ctx)
+	if err != nil {
+		return "", err
+	}
+
+	abiJSON := strings.TrimSpace(os.Getenv("POST_ATTEST_ABI"))
+	if abiJSON == "" {
+		abiJSON = `[{"type":"function","name":"attest","stateMutability":"nonpayable","inputs":[{"name":"hash","type":"bytes32"}],"outputs":[]}]`
+	}
+	parsed, err := abi.JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		return "", err
+	}
+
+	var hash32 [32]byte
+	copy(hash32[:], hashBytes)
+	data, err := parsed.Pack("attest", hash32)
+	if err != nil {
+		return "", err
+	}
+
+	gasLimit := uint64(200000)
+	if raw := strings.TrimSpace(os.Getenv("POST_ATTEST_GAS")); raw != "" {
+		if parsedGas, convErr := strconv.ParseUint(raw, 10, 64); convErr == nil && parsedGas > 0 {
+			gasLimit = parsedGas
+		}
+	}
+
+	tx := types.NewTransaction(nonce, common.HexToAddress(contractAddr), big.NewInt(0), gasLimit, gasPrice, data)
+	signed, err := types.SignTx(tx, types.NewEIP155Signer(a.chainID), priv)
+	if err != nil {
+		return "", err
+	}
+	if err := a.client.SendTransaction(a.ctx, signed); err != nil {
+		return "", err
+	}
+
 	return signed.Hash().Hex(), nil
 }
 

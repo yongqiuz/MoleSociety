@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +61,18 @@ type PostMedia struct {
 	CID        string `json:"cid"`
 }
 
+type PollOption struct {
+	Label string `json:"label"`
+	Votes int    `json:"votes"`
+}
+
+type Poll struct {
+	Options      []PollOption `json:"options"`
+	ExpiresAt    string       `json:"expiresAt"`
+	Multiple     bool         `json:"multiple"`
+	Voters       []string     `json:"voters"`
+}
+
 type SocialPost struct {
 	ID             string      `json:"id"`
 	AuthorID       string      `json:"authorId"`
@@ -78,6 +93,8 @@ type SocialPost struct {
 	Boosts         int         `json:"boosts"`
 	Likes          int         `json:"likes"`
 	Type           string      `json:"type"`
+	Interaction    string      `json:"interaction"`
+	Poll           *Poll       `json:"poll,omitempty"`
 	CreatedAt      string      `json:"createdAt"`
 }
 
@@ -165,12 +182,16 @@ type CreatePostRequest struct {
 	Content        string      `json:"content"`
 	Visibility     string      `json:"visibility"`
 	Type           string      `json:"type"`
+	Interaction    string      `json:"interaction"`
 	StorageURI     string      `json:"storageUri"`
 	AttestationURI string      `json:"attestationUri"`
 	Tags           []string    `json:"tags"`
 	MediaIDs       []string    `json:"mediaIds"`
 	ParentPostID   string      `json:"parentPostId"`
 	RootPostID     string      `json:"rootPostId"`
+	PollOptions    []string    `json:"pollOptions"`
+	PollExpiresIn  int         `json:"pollExpiresIn"` // in minutes
+	PollMultiple   bool        `json:"pollMultiple"`
 }
 
 type CreateConversationRequest struct {
@@ -209,7 +230,51 @@ func (s *SocialService) load() {
 		return
 	}
 
-	s.seedDefaults()
+	if shouldSeedSocialDefaults() {
+		s.seedDefaults()
+	} else {
+		s.instances = nil
+		s.users = nil
+		s.media = nil
+		s.posts = nil
+		s.conversations = nil
+	}
+	s.persistLocked()
+}
+
+func shouldSeedSocialDefaults() bool {
+	// Default OFF to ensure you start from a clean chain-owned repository.
+	value := strings.TrimSpace(os.Getenv("SOCIAL_SEED"))
+	if value == "" {
+		return false
+	}
+	value = strings.ToLower(value)
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func (s *SocialService) Reset(seed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if seed {
+		s.seedDefaults()
+	} else {
+		s.instances = nil
+		s.users = nil
+		s.media = nil
+		s.posts = nil
+		s.conversations = nil
+	}
+	if s.rdb != nil {
+		keys := []string{
+			"social:snapshot:users",
+			"social:snapshot:posts",
+			"social:snapshot:media",
+			"social:snapshot:conversations",
+			"social:snapshot:instances",
+		}
+		_ = s.rdb.Del(s.ctx, keys...).Err()
+	}
 	s.persistLocked()
 }
 
@@ -569,6 +634,32 @@ func (s *SocialService) Bootstrap(limit int, currentUserID string) BootstrapPayl
 	return payload
 }
 
+func (s *SocialService) BootstrapMine(limit int, currentUserID string) BootstrapPayload {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	payload := BootstrapPayload{
+		Stats:         SocialStats{Users: len(s.users), Posts: len(s.posts), MediaAssets: len(s.media), Conversations: len(s.conversations)},
+		Feed:          append([]SocialPost(nil), sliceTopLevelPostsByAuthor(s.posts, limit, currentUserID)...),
+		Users:         append([]SocialUser(nil), s.users...),
+		Media:         append([]MediaAsset(nil), sliceMedia(s.media, limit)...),
+		Conversations: append([]Conversation(nil), sliceConversations(s.conversations, limit)...),
+		Instances:     append([]FederationInstance(nil), s.instances...),
+	}
+	if strings.TrimSpace(currentUserID) != "" {
+		if user, err := s.findUserLocked(currentUserID); err == nil {
+			payload.CurrentUser = &user
+			return payload
+		}
+	}
+
+	if len(s.users) > 0 {
+		user := s.users[0]
+		payload.CurrentUser = &user
+	}
+	return payload
+}
+
 func (s *SocialService) ListInstances() []FederationInstance {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -704,6 +795,33 @@ func (s *SocialService) Feed(limit int) []SocialPost {
 	return append([]SocialPost(nil), sliceTopLevelPosts(s.posts, limit)...)
 }
 
+func (s *SocialService) FeedMine(limit int, currentUserID string) []SocialPost {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]SocialPost(nil), sliceTopLevelPostsByAuthor(s.posts, limit, currentUserID)...)
+}
+
+func sliceTopLevelPostsByAuthor(posts []SocialPost, limit int, authorID string) []SocialPost {
+	authorID = strings.TrimSpace(authorID)
+	if authorID == "" {
+		return nil
+	}
+	filtered := make([]SocialPost, 0, limit)
+	for _, post := range posts {
+		if strings.TrimSpace(post.ParentPostID) != "" {
+			continue
+		}
+		if post.AuthorID != authorID {
+			continue
+		}
+		filtered = append(filtered, post)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered
+}
+
 func (s *SocialService) GetPost(id string) (*SocialPost, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -787,6 +905,11 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 		})
 	}
 
+	storageURI := strings.TrimSpace(req.StorageURI)
+	if storageURI == "" {
+		storageURI = buildLocalStorageURI(req)
+	}
+
 	post := SocialPost{
 		ID:             nextID("post"),
 		AuthorID:       author.ID,
@@ -796,7 +919,7 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 		Kind:           kind,
 		Content:        strings.TrimSpace(req.Content),
 		Visibility:     valueOrDefault(strings.TrimSpace(req.Visibility), "public"),
-		StorageURI:     strings.TrimSpace(req.StorageURI),
+		StorageURI:     storageURI,
 		AttestationURI: strings.TrimSpace(req.AttestationURI),
 		Tags:           req.Tags,
 		Media:          attachments,
@@ -804,12 +927,117 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 		RootPostID:     rootPostID,
 		ReplyDepth:     replyDepth,
 		Type:           valueOrDefault(strings.TrimSpace(req.Type), "post"),
+		Interaction:    valueOrDefault(strings.TrimSpace(req.Interaction), "anyone"),
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if len(req.PollOptions) >= 2 {
+		expiresIn := req.PollExpiresIn
+		if expiresIn <= 0 {
+			expiresIn = 1440 // 1 day default
+		}
+		
+		poll := &Poll{
+			Options:   make([]PollOption, len(req.PollOptions)),
+			ExpiresAt: time.Now().UTC().Add(time.Duration(expiresIn) * time.Minute).Format(time.RFC3339),
+			Multiple:  req.PollMultiple,
+			Voters:    []string{},
+		}
+		for i, opt := range req.PollOptions {
+			poll.Options[i] = PollOption{Label: strings.TrimSpace(opt), Votes: 0}
+		}
+		post.Poll = poll
 	}
 
 	s.posts = append([]SocialPost{post}, s.posts...)
 	s.refreshPostAggregatesLocked()
 	s.sortLocked()
+	s.persistLocked()
+	return post, nil
+}
+
+func buildLocalStorageURI(req CreatePostRequest) string {
+	// Deterministic digest for your own repository even before you wire external storage.
+	canonical := map[string]any{
+		"authorId":     strings.TrimSpace(req.AuthorID),
+		"content":      strings.TrimSpace(req.Content),
+		"tags":         req.Tags,
+		"mediaIds":     req.MediaIDs,
+		"parentPostId": strings.TrimSpace(req.ParentPostID),
+		"rootPostId":   strings.TrimSpace(req.RootPostID),
+		"visibility":   strings.TrimSpace(req.Visibility),
+		"type":         strings.TrimSpace(req.Type),
+		"interaction":  strings.TrimSpace(req.Interaction),
+		"pollOptions":  req.PollOptions,
+		"pollExpiresIn": req.PollExpiresIn,
+		"pollMultiple": req.PollMultiple,
+	}
+	raw, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256://%x", sum[:])
+}
+
+func (s *SocialService) SetPostAttestation(postID string, uri string) (SocialPost, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, idx := s.findPostLocked(postID)
+	if idx == -1 {
+		return SocialPost{}, errors.New("post not found: " + postID)
+	}
+	uri = strings.TrimSpace(uri)
+	s.posts[idx].AttestationURI = uri
+	s.persistLocked()
+	return s.posts[idx], nil
+}
+
+func (s *SocialService) VotePoll(postID string, userID string, optionIndices []int) (SocialPost, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	post, idx := s.findPostLocked(postID)
+	if idx == -1 {
+		return SocialPost{}, errors.New("post not found")
+	}
+
+	if post.Poll == nil {
+		return SocialPost{}, errors.New("post has no poll")
+	}
+
+	// Check expiration
+	expiresAt, err := time.Parse(time.RFC3339, post.Poll.ExpiresAt)
+	if err == nil && time.Now().UTC().After(expiresAt) {
+		return SocialPost{}, errors.New("poll has expired")
+	}
+
+	// Double voting check
+	for _, v := range post.Poll.Voters {
+		if v == userID {
+			return SocialPost{}, errors.New("already voted")
+		}
+	}
+
+	// Validate indices
+	if len(optionIndices) == 0 {
+		return SocialPost{}, errors.New("no options selected")
+	}
+	if !post.Poll.Multiple && len(optionIndices) > 1 {
+		return SocialPost{}, errors.New("single choice only")
+	}
+
+	for _, optIdx := range optionIndices {
+		if optIdx < 0 || optIdx >= len(post.Poll.Options) {
+			return SocialPost{}, errors.New("invalid option index")
+		}
+	}
+
+	// Record votes
+	for _, optIdx := range optionIndices {
+		post.Poll.Options[optIdx].Votes++
+	}
+	post.Poll.Voters = append(post.Poll.Voters, userID)
+
+	s.posts[idx] = post
 	s.persistLocked()
 	return post, nil
 }
@@ -966,6 +1194,12 @@ func (a *App) bootstrapHandler(w http.ResponseWriter, r *http.Request) {
 	if currentUser != nil {
 		currentUserID = currentUser.ID
 	}
+	mineRaw := strings.TrimSpace(r.URL.Query().Get("mine"))
+	mine := mineRaw == "1" || strings.EqualFold(mineRaw, "true") || strings.EqualFold(mineRaw, "yes") || strings.EqualFold(mineRaw, "on")
+	if mine {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.BootstrapMine(limit, currentUserID)})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.Bootstrap(limit, currentUserID)})
 }
 
@@ -1028,6 +1262,17 @@ func (a *App) updateUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) feedHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 20)
+	mineRaw := strings.TrimSpace(r.URL.Query().Get("mine"))
+	mine := mineRaw == "1" || strings.EqualFold(mineRaw, "true") || strings.EqualFold(mineRaw, "yes") || strings.EqualFold(mineRaw, "on")
+	if mine {
+		currentUser, _ := a.optionalAuthenticatedUser(r)
+		currentUserID := ""
+		if currentUser != nil {
+			currentUserID = currentUser.ID
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.FeedMine(limit, currentUserID)})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.Feed(limit)})
 }
 
@@ -1048,7 +1293,47 @@ func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+
+	if strings.TrimSpace(post.AttestationURI) == "" {
+		txHash, attestErr := a.executePostAttestation(post.StorageURI)
+		if attestErr == nil {
+			chainPart := "0"
+			if a.chainID != nil {
+				chainPart = a.chainID.String()
+			}
+			uri := fmt.Sprintf("evm://%s/%s", chainPart, txHash)
+			updated, setErr := a.social.SetPostAttestation(post.ID, uri)
+			if setErr == nil {
+				post = updated
+			}
+		}
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "data": post})
+}
+
+type VotePollRequest struct {
+	OptionIndices []int `json:"optionIndices"`
+}
+
+func (a *App) votePollHandler(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := a.requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
+	postID := mux.Vars(r)["id"]
+	var req VotePollRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		return
+	}
+
+	post, err := a.social.VotePoll(postID, authUser.ID, req.OptionIndices)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": post})
 }
 
 func (a *App) getPostHandler(w http.ResponseWriter, r *http.Request) {

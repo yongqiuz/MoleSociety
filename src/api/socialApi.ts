@@ -42,13 +42,27 @@ export type SocialPost = {
   tags: string[];
   media: PostMedia[] | null;
   type: string;
+  interaction: string;
   parentPostId?: string;
   rootPostId?: string;
   replyDepth?: number;
   replies: number;
   boosts: number;
   likes: number;
+  poll?: Poll;
   createdAt: string;
+};
+
+export type PollOption = {
+  label: string;
+  votes: number;
+};
+
+export type Poll = {
+  options: PollOption[];
+  expiresAt: string;
+  multiple: boolean;
+  voters: string[];
 };
 
 export type PostThread = {
@@ -135,10 +149,15 @@ type CreatePostRequest = {
   kind?: string;
   content: string;
   visibility: string;
+  interaction: string;
   storageUri: string;
   attestationUri: string;
   tags: string[];
   mediaIds: string[];
+  type: string;
+  pollOptions?: string[];
+  pollExpiresIn?: number;
+  pollMultiple?: boolean;
   parentPostId?: string;
   rootPostId?: string;
 };
@@ -187,6 +206,10 @@ export async function fetchSocialBootstrap(limit = 20) {
   return request<BootstrapPayload>(`/api/v1/social/bootstrap?limit=${limit}`);
 }
 
+export async function fetchSocialBootstrapMine(limit = 20) {
+  return request<BootstrapPayload>(`/api/v1/social/bootstrap?limit=${limit}&mine=1`);
+}
+
 export async function createMediaAsset(payload: CreateMediaRequest) {
   return request<MediaAsset>('/api/v1/social/media', {
     method: 'POST',
@@ -222,3 +245,11 @@ export async function updateUserProfile(userId: string, payload: UpdateUserReque
     body: JSON.stringify(payload),
   });
 }
+
+export async function voteOnPoll(postId: string, optionIndices: number[]) {
+  return request<SocialPost>(`/api/v1/social/posts/${postId}/poll/vote`, {
+    method: 'POST',
+    body: JSON.stringify({ optionIndices }),
+  });
+}
+

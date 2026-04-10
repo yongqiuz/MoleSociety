@@ -224,7 +224,7 @@ async function signInWithWallet() {
                     v-model="loginForm.password"
                     :type="showPassword ? 'text' : 'password'" 
                     class="w-full rounded-2xl border border-white/10 bg-slate-950/60 py-3.5 pl-12 pr-12 text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/50 focus:bg-slate-900/80 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 transition-all font-medium"
-                    placeholder="••••••••"
+                    placeholder="请输入密码"
                   >
                   <button type="button" @click="showPassword = !showPassword" class="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-500 hover:text-slate-300 transition-colors">
                     <EyeOff v-if="!showPassword" class="h-5 w-5" />
