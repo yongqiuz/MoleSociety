@@ -33,21 +33,21 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const { isAuthenticated, loadSession } = useAuth();
-  loadSession();
+  return loadSession().then(() => {
+    if (to.meta.requiresAuth && !isAuthenticated.value) {
+      return {
+        path: '/login',
+        query: { redirect: to.fullPath },
+      };
+    }
 
-  if (to.meta.requiresAuth && !isAuthenticated.value) {
-    return {
-      path: '/login',
-      query: { redirect: to.fullPath },
-    };
-  }
+    if (to.meta.guestOnly && isAuthenticated.value) {
+      const redirect = typeof to.query.redirect === 'string' ? to.query.redirect : '/app';
+      return redirect;
+    }
 
-  if (to.meta.guestOnly && isAuthenticated.value) {
-    const redirect = typeof to.query.redirect === 'string' ? to.query.redirect : '/app';
-    return redirect;
-  }
-
-  return true;
+    return true;
+  });
 });
 
 export default router;

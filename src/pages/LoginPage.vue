@@ -1,36 +1,25 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuth } from '../composables/useAuth';
 
 const router = useRouter();
 const route = useRoute();
-const { demoAccounts, login } = useAuth();
+const { login } = useAuth();
 
-const selectedAccountId = ref(demoAccounts[0]?.id ?? '');
-const password = ref('');
 const loading = ref(false);
 const errorMessage = ref('');
 
-const selectedAccount = computed(
-  () => demoAccounts.find((account) => account.id === selectedAccountId.value) ?? demoAccounts[0] ?? null,
-);
-
-async function submitLogin() {
-  if (!selectedAccountId.value) {
-    errorMessage.value = '请先选择一个演示账号';
-    return;
-  }
-
+async function signInWithWallet() {
   loading.value = true;
   errorMessage.value = '';
 
   try {
-    login(selectedAccountId.value, password.value);
+    await login();
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/app';
     await router.replace(redirect);
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '登录失败，请稍后重试';
+    errorMessage.value = error instanceof Error ? error.message : 'Wallet sign-in failed.';
   } finally {
     loading.value = false;
   }
@@ -48,92 +37,79 @@ async function submitLogin() {
             </div>
             <div>
               <div class="text-3xl font-semibold tracking-tight">MoleSociety</div>
-              <div class="mt-1 text-sm text-slate-400">去中心化社交平台登录入口</div>
+              <div class="mt-1 text-sm text-slate-400">Wallet signature authentication</div>
             </div>
           </div>
 
           <div class="mt-10 max-w-xl space-y-6">
             <div>
               <div class="text-5xl font-semibold leading-tight">
-                登录后进入你的
-                <span class="text-violet-400">社交主场</span>
+                Sign in with your
+                <span class="text-violet-400">wallet identity</span>
               </div>
               <div class="mt-4 text-lg leading-8 text-slate-300">
-                当前先提供前端原型级登录流程，使用系统内置演示账号进入社区。后续可以平滑接到真实后端认证、钱包签名登录或 SSO。
+                MoleSociety now uses wallet signatures for authentication. Your wallet proves identity, and the backend
+                issues a secure session cookie for posting, messaging, and media upload.
               </div>
             </div>
 
             <div class="grid gap-4 md:grid-cols-3">
-              <button
-                v-for="account in demoAccounts"
-                :key="account.id"
-                @click="selectedAccountId = account.id"
-                class="rounded-3xl border p-4 text-left transition"
-                :class="
-                  selectedAccountId === account.id
-                    ? 'border-violet-400/60 bg-violet-500/15 shadow-[0_0_0_1px_rgba(167,139,250,0.25)]'
-                    : 'border-white/10 bg-slate-900/60 hover:border-white/20 hover:bg-slate-900'
-                "
-              >
-                <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
-                  {{ account.displayName.slice(0, 1) }}
+              <article class="rounded-3xl border border-white/10 bg-slate-900/60 p-5">
+                <div class="text-sm uppercase tracking-[0.2em] text-violet-300">1</div>
+                <div class="mt-3 text-lg font-semibold">Connect</div>
+                <div class="mt-2 text-sm leading-7 text-slate-400">
+                  Use MetaMask or any injected EVM wallet to expose your address.
                 </div>
-                <div class="mt-4 text-lg font-semibold">{{ account.displayName }}</div>
-                <div class="mt-1 text-sm text-slate-400">{{ account.handle }}@{{ account.instance }}</div>
-              </button>
+              </article>
+
+              <article class="rounded-3xl border border-white/10 bg-slate-900/60 p-5">
+                <div class="text-sm uppercase tracking-[0.2em] text-violet-300">2</div>
+                <div class="mt-3 text-lg font-semibold">Sign</div>
+                <div class="mt-2 text-sm leading-7 text-slate-400">
+                  The app asks your wallet to sign a short-lived login challenge.
+                </div>
+              </article>
+
+              <article class="rounded-3xl border border-white/10 bg-slate-900/60 p-5">
+                <div class="text-sm uppercase tracking-[0.2em] text-violet-300">3</div>
+                <div class="mt-3 text-lg font-semibold">Enter</div>
+                <div class="mt-2 text-sm leading-7 text-slate-400">
+                  The backend verifies the signature and creates your MoleSociety session.
+                </div>
+              </article>
             </div>
           </div>
         </section>
 
         <section class="rounded-[32px] border border-white/10 bg-slate-900/90 p-8 shadow-[0_30px_90px_rgba(15,23,42,0.45)]">
-          <div class="text-sm font-semibold uppercase tracking-[0.24em] text-violet-400">Sign In</div>
-          <div class="mt-4 text-3xl font-semibold">登录 MoleSociety</div>
+          <div class="text-sm font-semibold uppercase tracking-[0.24em] text-violet-400">Wallet Login</div>
+          <div class="mt-4 text-3xl font-semibold">Authenticate with an EVM wallet</div>
           <div class="mt-2 text-base leading-7 text-slate-400">
-            选择一个账号并输入密码即可进入。当前密码仅作为前端原型校验，后续可以替换成真实登录 API。
+            The signed challenge never creates an on-chain transaction. It only proves wallet ownership and opens a
+            server session for this app.
           </div>
 
-          <form class="mt-8 space-y-6" @submit.prevent="submitLogin">
-            <label class="block">
-              <div class="mb-3 text-sm font-medium text-slate-200">账号身份</div>
-              <select
-                v-model="selectedAccountId"
-                class="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-4 text-base text-slate-100 outline-none transition focus:border-violet-400/60"
-              >
-                <option v-for="account in demoAccounts" :key="account.id" :value="account.id">
-                  {{ account.displayName }} · {{ account.handle }}@{{ account.instance }}
-                </option>
-              </select>
-            </label>
+          <div class="mt-8 rounded-3xl border border-white/10 bg-white/5 p-5">
+            <div class="text-sm font-medium text-slate-200">Before you sign in</div>
+            <ul class="mt-3 space-y-3 text-sm leading-7 text-slate-300">
+              <li>Install MetaMask or another injected EVM wallet.</li>
+              <li>Unlock the wallet in this browser.</li>
+              <li>Approve the signature request when the wallet prompt appears.</li>
+            </ul>
+          </div>
 
-            <label class="block">
-              <div class="mb-3 text-sm font-medium text-slate-200">密码</div>
-              <input
-                v-model="password"
-                type="password"
-                placeholder="输入任意非空密码进入原型"
-                class="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-4 text-base text-slate-100 outline-none placeholder:text-slate-500 transition focus:border-violet-400/60"
-              />
-            </label>
+          <div v-if="errorMessage" class="mt-6 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {{ errorMessage }}
+          </div>
 
-            <div v-if="selectedAccount" class="rounded-3xl border border-white/10 bg-white/5 p-5">
-              <div class="text-sm font-medium text-slate-200">将以该身份进入社区</div>
-              <div class="mt-3 text-xl font-semibold">{{ selectedAccount.displayName }}</div>
-              <div class="mt-1 text-sm text-slate-400">{{ selectedAccount.handle }}@{{ selectedAccount.instance }}</div>
-              <div class="mt-3 text-sm leading-7 text-slate-300">{{ selectedAccount.bio }}</div>
-            </div>
-
-            <div v-if="errorMessage" class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-              {{ errorMessage }}
-            </div>
-
-            <button
-              :disabled="loading"
-              type="submit"
-              class="w-full rounded-2xl bg-violet-600 px-6 py-4 text-base font-semibold text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {{ loading ? '登录中...' : '进入社区' }}
-            </button>
-          </form>
+          <button
+            :disabled="loading"
+            type="button"
+            class="mt-8 w-full rounded-2xl bg-violet-600 px-6 py-4 text-base font-semibold text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
+            @click="signInWithWallet"
+          >
+            {{ loading ? 'Waiting for wallet signature...' : 'Connect wallet and sign in' }}
+          </button>
         </section>
       </div>
     </div>

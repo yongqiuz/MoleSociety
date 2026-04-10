@@ -1,101 +1,61 @@
 import { computed, ref } from 'vue';
-
-export type AuthSession = {
-  id: string;
-  handle: string;
-  displayName: string;
-  instance: string;
-  bio: string;
-  avatarUrl: string;
-};
-
-const STORAGE_KEY = 'molesociety-auth-session';
-
-const demoAccounts: AuthSession[] = [
-  {
-    id: 'user_archive',
-    handle: '@archive',
-    displayName: 'Whale Archive',
-    instance: 'vault.social',
-    bio: '为创作者提供永久内容归档与链上身份锚定。',
-    avatarUrl: '',
-  },
-  {
-    id: 'user_librarian',
-    handle: '@librarian',
-    displayName: 'Node Librarian',
-    instance: 'readers.polkadot',
-    bio: '把书籍确权、媒体存储和去中心化社交连接在一起。',
-    avatarUrl: '',
-  },
-  {
-    id: 'user_fedilab',
-    handle: '@fedilab',
-    displayName: 'Open Federation Lab',
-    instance: 'relay.zone',
-    bio: '探索 ActivityPub、实时会话和多实例协作。',
-    avatarUrl: '',
-  },
-];
+import { ApiError, connectWalletAndLogin, fetchCurrentSession, logoutSession, type AuthSession } from '../api/authApi';
 
 const session = ref<AuthSession | null>(null);
-let initialized = false;
+const loading = ref(false);
+const ready = ref(false);
+let pendingLoad: Promise<AuthSession | null> | null = null;
 
-function loadSession() {
-  if (typeof window === 'undefined' || initialized) return;
-  initialized = true;
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    session.value = JSON.parse(raw) as AuthSession;
-  } catch {
-    session.value = null;
+async function loadSession(force = false) {
+  if (pendingLoad && !force) {
+    return pendingLoad;
   }
+
+  pendingLoad = (async () => {
+    loading.value = true;
+    try {
+      const nextSession = await fetchCurrentSession();
+      session.value = nextSession;
+      ready.value = true;
+      return nextSession;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        session.value = null;
+        ready.value = true;
+        return null;
+      }
+      throw error;
+    } finally {
+      loading.value = false;
+      pendingLoad = null;
+    }
+  })();
+
+  return pendingLoad;
 }
 
-function persistSession(nextSession: AuthSession | null) {
-  if (typeof window === 'undefined') return;
-
-  if (!nextSession) {
-    window.localStorage.removeItem(STORAGE_KEY);
-    return;
-  }
-
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSession));
-}
-
-function login(accountId: string, password: string) {
-  loadSession();
-
-  const trimmedPassword = password.trim();
-  if (!trimmedPassword) {
-    throw new Error('请输入密码后再登录');
-  }
-
-  const nextSession = demoAccounts.find((account) => account.id === accountId);
-  if (!nextSession) {
-    throw new Error('未找到对应的登录账号');
-  }
-
+async function login() {
+  const nextSession = await connectWalletAndLogin();
   session.value = nextSession;
-  persistSession(nextSession);
+  ready.value = true;
   return nextSession;
 }
 
-function logout() {
-  loadSession();
-  session.value = null;
-  persistSession(null);
+async function logout() {
+  try {
+    await logoutSession();
+  } finally {
+    session.value = null;
+    ready.value = true;
+  }
 }
 
 export function useAuth() {
-  loadSession();
-
   return {
     session,
-    demoAccounts,
     isAuthenticated: computed(() => !!session.value),
+    isLoading: computed(() => loading.value),
+    isReady: computed(() => ready.value),
     login,
     logout,
     loadSession,

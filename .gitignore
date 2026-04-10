@@ -1,10 +1,16 @@
-<<<<<<< HEAD
 # Dependency directories
 node_modules/
+vendor/
 
 # Build outputs
 dist/
 *.local
+main
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
 # Logs
 *.log
@@ -14,26 +20,18 @@ deploy.log
 .vscode/
 .idea/
 .DS_Store
+*.swp
 
 # Environment variables
 .env
 .env.local
 .env.*.local
+backend/.env
 
-# Optional: If you don't want to track the deployment script's temporary state
-# But usually whale-deploy.sh should be tracked.
-=======
-.env
-# 编译后的二进制文件（假设你编译出的文件名叫 server 或 backend）
-backend
-main
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# 依赖文件夹
-vendor/
->>>>>>> 78d7fc46 (feat: 提交排行榜与 Reward 逻辑更新)
-node_modules
+# Backend generated artifacts and local environments
+backend/*.log
+backend/relay-server
+backend/relay.exe
+backend/whale-vault-backend
+backend/my_project_venv/
+backend/venv/
