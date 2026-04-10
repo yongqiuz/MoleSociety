@@ -86,7 +86,7 @@ func main() {
 
 	addr := envOrDefault("BACKEND_ADDR", "0.0.0.0:8080")
 	log.Printf("MoleSociety backend listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, cors(router)))
+	log.Fatal(http.ListenAndServe(addr, requestLogger(cors(router))))
 }
 
 func initRedis(ctx context.Context) *redis.Client {
@@ -174,6 +174,7 @@ func (a *App) registerSocialRoutes(r *mux.Router) {
 	r.HandleFunc("/api/v1/social/users", a.listUsersHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/users", a.createUserHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/users/{id}", a.getUserHandler).Methods(http.MethodGet, http.MethodOptions)
+	r.HandleFunc("/api/v1/social/users/{id}", a.updateUserHandler).Methods(http.MethodPatch, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/feed", a.feedHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts", a.createPostHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts/{id}", a.getPostHandler).Methods(http.MethodGet, http.MethodOptions)
@@ -444,6 +445,10 @@ func isAllowedOrigin(origin string) bool {
 		"https://127.0.0.1",
 		"http://[::1]",
 		"https://[::1]",
+		"http://192.168.",
+		"https://192.168.",
+		"http://10.",
+		"https://10.",
 	}
 
 	for _, prefix := range allowedPrefixes {
@@ -453,6 +458,25 @@ func isAllowedOrigin(origin string) bool {
 	}
 
 	return false
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.code = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		log.Printf("%s %s %d %s [origin=%s]", r.Method, r.URL.Path, sw.code, time.Since(start).Round(time.Millisecond), r.Header.Get("Origin"))
+	})
 }
 
 func envOrDefault(key, fallback string) string {

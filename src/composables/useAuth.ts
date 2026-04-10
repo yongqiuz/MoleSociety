@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { ApiError, connectWalletAndLogin, fetchCurrentSession, logoutSession, type AuthSession } from '../api/authApi';
+import { ApiError, connectWalletAndLogin, fetchCurrentSession, logoutSession, passwordLogin as apiPasswordLogin, type AuthSession } from '../api/authApi';
 
 const session = ref<AuthSession | null>(null);
 const loading = ref(false);
@@ -41,6 +41,13 @@ async function login() {
   return nextSession;
 }
 
+async function loginWithPassword(identifier: string, password: string) {
+  const nextSession = await apiPasswordLogin(identifier, password);
+  session.value = nextSession;
+  ready.value = true;
+  return nextSession;
+}
+
 async function logout() {
   try {
     await logoutSession();
@@ -51,12 +58,23 @@ async function logout() {
 }
 
 export function useAuth() {
+  const currentUser = computed(() => session.value);
+
+  function updateCurrentUserLocally(data: Partial<AuthSession>) {
+    if (session.value) {
+      session.value = { ...session.value, ...data };
+    }
+  }
+
   return {
     session,
+    currentUser,
+    updateCurrentUserLocally,
     isAuthenticated: computed(() => !!session.value),
     isLoading: computed(() => loading.value),
     isReady: computed(() => ready.value),
     login,
+    loginWithPassword,
     logout,
     loadSession,
   };

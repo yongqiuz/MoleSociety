@@ -107,6 +107,42 @@ function saveAppearanceSettings(next: AppearanceSettings) {
   settings.value = { ...next };
 }
 
+const themeStyles = computed<Record<string, string>>(() => {
+  if (resolvedTheme.value === 'dark') {
+    return {
+      '--app-bg': '#0f1117',
+      '--frame-bg': '#171a22',
+      '--panel-bg': '#131720',
+      '--panel-soft': '#1b2130',
+      '--panel-muted': '#202738',
+      '--panel-contrast': '#0f1320',
+      '--border-color': 'rgba(148, 163, 184, 0.18)',
+      '--text-primary': '#f8fafc',
+      '--text-secondary': '#cbd5e1',
+      '--text-muted': '#94a3b8',
+      '--text-soft': '#e2e8f0',
+      '--chip-bg': 'rgba(255,255,255,0.06)',
+      '--chip-hover': 'rgba(255,255,255,0.1)',
+    };
+  }
+
+  return {
+    '--app-bg': '#f4f7fb',
+    '--frame-bg': '#ffffff',
+    '--panel-bg': '#f8fafc',
+    '--panel-soft': '#ffffff',
+    '--panel-muted': '#eef2f7',
+    '--panel-contrast': '#edf2f9',
+    '--border-color': 'rgba(15, 23, 42, 0.08)',
+    '--text-primary': '#0f172a',
+    '--text-secondary': '#334155',
+    '--text-muted': '#64748b',
+    '--text-soft': '#1e293b',
+    '--chip-bg': 'rgba(148, 163, 184, 0.12)',
+    '--chip-hover': 'rgba(148, 163, 184, 0.2)',
+  };
+});
+
 export function useAppearance() {
   ensureInitialized();
 
@@ -115,5 +151,6 @@ export function useAppearance() {
     defaultAppearanceSettings,
     resolvedTheme,
     saveAppearanceSettings,
+    themeStyles,
   };
 }

@@ -1,7 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import App from '../App.vue';
+import MainApp from '../pages/MainApp.vue';
 import LoginPage from '../pages/LoginPage.vue';
 import LogoutPage from '../pages/LogoutPage.vue';
+import SettingsPage from '../pages/SettingsPage.vue';
+import ProfileEditPage from '../pages/ProfileEditPage.vue';
+import AppearanceSettings from '../components/settings/AppearanceSettings.vue';
+import AccountSettings from '../components/settings/AccountSettings.vue';
+import PlaceholderSettings from '../components/settings/PlaceholderSettings.vue';
 import { useAuth } from '../composables/useAuth';
 
 const router = createRouter({
@@ -9,7 +14,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/app',
+      redirect: '/login',
     },
     {
       path: '/login',
@@ -25,8 +30,43 @@ const router = createRouter({
     {
       path: '/app',
       name: 'app',
-      component: App,
+      component: MainApp,
       meta: { requiresAuth: true },
+    },
+    {
+      path: '/profile/edit',
+      name: 'profile-edit',
+      component: ProfileEditPage,
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/settings',
+      name: 'settings',
+      component: SettingsPage,
+      redirect: '/settings/appearance',
+      meta: { requiresAuth: true },
+      children: [
+        {
+          path: 'appearance',
+          name: 'settings-appearance',
+          component: AppearanceSettings,
+        },
+        {
+          path: 'notifications',
+          name: 'settings-notifications',
+          component: PlaceholderSettings,
+        },
+        {
+          path: 'privacy',
+          name: 'settings-privacy',
+          component: PlaceholderSettings,
+        },
+        {
+          path: 'account',
+          name: 'settings-account',
+          component: AccountSettings,
+        },
+      ],
     },
   ],
 });

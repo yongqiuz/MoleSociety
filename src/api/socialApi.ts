@@ -1,3 +1,8 @@
+export type UserField = {
+  name: string;
+  value: string;
+};
+
 export type SocialUser = {
   id: string;
   handle: string;
@@ -6,6 +11,9 @@ export type SocialUser = {
   instance: string;
   wallet: string;
   avatarUrl: string;
+  fields: UserField[];
+  featuredTags: string[];
+  isBot: boolean;
   followers: number;
   following: number;
   createdAt: string;
@@ -33,6 +41,7 @@ export type SocialPost = {
   attestationUri: string;
   tags: string[];
   media: PostMedia[] | null;
+  type: string;
   parentPostId?: string;
   rootPostId?: string;
   replyDepth?: number;
@@ -139,9 +148,22 @@ type CreateMessageRequest = {
   body: string;
 };
 
-const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || 'http://localhost:8080').replace(/\/$/, '');
+export type UpdateUserRequest = {
+  displayName?: string;
+  bio?: string;
+  avatarUrl?: string;
+  fields?: UserField[];
+  featuredTags?: string[];
+  isBot?: boolean;
+};
+
+const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+const defaultApiUrl = `http://${fallbackHost}:8080`;
+const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || defaultApiUrl).replace(/\/$/, '');
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method || 'GET';
+  console.log(`[API] ${method} ${path}`);
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     headers: {
@@ -153,9 +175,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const payload = (await response.json()) as ApiEnvelope<T> | { ok: boolean; error?: string };
   if (!response.ok || !payload.ok) {
+    console.warn(`[API] ${method} ${path} → ${response.status}`, payload.error);
     throw new Error(payload.error || `Request failed: ${response.status}`);
   }
 
+  console.log(`[API] ${method} ${path} → ${response.status} OK`);
   return (payload as ApiEnvelope<T>).data;
 }
 
@@ -188,6 +212,13 @@ export async function fetchPostReplies(postId: string, limit = 20) {
 export async function createConversationMessage(conversationId: string, payload: CreateMessageRequest) {
   return request<SocialConversation>(`/api/v1/social/conversations/${conversationId}/messages`, {
     method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUserProfile(userId: string, payload: UpdateUserRequest) {
+  return request<SocialUser>(`/api/v1/social/users/${userId}`, {
+    method: 'PATCH',
     body: JSON.stringify(payload),
   });
 }

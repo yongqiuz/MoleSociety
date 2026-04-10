@@ -15,17 +15,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type UserField struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 type SocialUser struct {
-	ID          string `json:"id"`
-	Handle      string `json:"handle"`
-	DisplayName string `json:"displayName"`
-	Bio         string `json:"bio"`
-	Instance    string `json:"instance"`
-	Wallet      string `json:"wallet"`
-	AvatarURL   string `json:"avatarUrl"`
-	Followers   int    `json:"followers"`
-	Following   int    `json:"following"`
-	CreatedAt   string `json:"createdAt"`
+	ID           string      `json:"id"`
+	Handle       string      `json:"handle"`
+	DisplayName  string      `json:"displayName"`
+	Bio          string      `json:"bio"`
+	Instance     string      `json:"instance"`
+	Wallet       string      `json:"wallet"`
+	AvatarURL    string      `json:"avatarUrl"`
+	Fields       []UserField `json:"fields"`
+	FeaturedTags []string    `json:"featuredTags"`
+	IsBot        bool        `json:"isBot"`
+	Followers    int         `json:"followers"`
+	Following    int         `json:"following"`
+	CreatedAt    string      `json:"createdAt"`
 }
 
 type MediaAsset struct {
@@ -69,6 +77,7 @@ type SocialPost struct {
 	Replies        int         `json:"replies"`
 	Boosts         int         `json:"boosts"`
 	Likes          int         `json:"likes"`
+	Type           string      `json:"type"`
 	CreatedAt      string      `json:"createdAt"`
 }
 
@@ -130,6 +139,15 @@ type CreateUserRequest struct {
 	AvatarURL   string `json:"avatarUrl"`
 }
 
+type UpdateUserRequest struct {
+	DisplayName  *string      `json:"displayName,omitempty"`
+	Bio          *string      `json:"bio,omitempty"`
+	AvatarURL    *string      `json:"avatarUrl,omitempty"`
+	Fields       *[]UserField `json:"fields,omitempty"`
+	FeaturedTags *[]string    `json:"featuredTags,omitempty"`
+	IsBot        *bool        `json:"isBot,omitempty"`
+}
+
 type CreateMediaRequest struct {
 	OwnerID    string `json:"ownerId"`
 	Name       string `json:"name"`
@@ -142,16 +160,17 @@ type CreateMediaRequest struct {
 }
 
 type CreatePostRequest struct {
-	AuthorID       string   `json:"authorId"`
-	Kind           string   `json:"kind"`
-	Content        string   `json:"content"`
-	Visibility     string   `json:"visibility"`
-	StorageURI     string   `json:"storageUri"`
-	AttestationURI string   `json:"attestationUri"`
-	Tags           []string `json:"tags"`
-	MediaIDs       []string `json:"mediaIds"`
-	ParentPostID   string   `json:"parentPostId"`
-	RootPostID     string   `json:"rootPostId"`
+	AuthorID       string      `json:"authorId"`
+	Kind           string      `json:"kind"`
+	Content        string      `json:"content"`
+	Visibility     string      `json:"visibility"`
+	Type           string      `json:"type"`
+	StorageURI     string      `json:"storageUri"`
+	AttestationURI string      `json:"attestationUri"`
+	Tags           []string    `json:"tags"`
+	MediaIDs       []string    `json:"mediaIds"`
+	ParentPostID   string      `json:"parentPostId"`
+	RootPostID     string      `json:"rootPostId"`
 }
 
 type CreateConversationRequest struct {
@@ -308,20 +327,6 @@ func (s *SocialService) seedDefaults() {
 
 	s.posts = []SocialPost{
 		{
-			ID:             "post_archive",
-			AuthorID:       "user_archive",
-			AuthorHandle:   "@archive",
-			AuthorName:     "Whale Archive",
-			Instance:       "vault.social",
-			Kind:           "post",
-			Content:        "把“每本书一个 NFT 身份”的思路升级成社交协议之后，内容、关系和媒体都应该拥有可迁移、可验证、可存档的数字主权。",
-			Visibility:     "public",
-			StorageURI:     "ar://post-archive",
-			AttestationURI: "attestation://bookproof/0xa18f...3c92",
-			Tags:           []string{"去中心化社交", "数字主权", "链上身份"},
-			Boosts:         31,
-			Likes:          88,
-			CreatedAt:      now.Add(-2 * time.Hour).Format(time.RFC3339),
 		},
 		{
 			ID:             "post_librarian",
@@ -588,6 +593,46 @@ func (s *SocialService) GetUser(id string) (*SocialUser, error) {
 	return nil, errors.New("user not found: " + id)
 }
 
+func (s *SocialService) UpdateUser(id string, req UpdateUserRequest) (SocialUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i, user := range s.users {
+		if user.ID == id {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return SocialUser{}, errors.New("user not found: " + id)
+	}
+
+	user := &s.users[idx]
+	if req.DisplayName != nil {
+		user.DisplayName = strings.TrimSpace(*req.DisplayName)
+	}
+	if req.Bio != nil {
+		user.Bio = strings.TrimSpace(*req.Bio)
+	}
+	if req.AvatarURL != nil {
+		user.AvatarURL = strings.TrimSpace(*req.AvatarURL)
+	}
+	if req.Fields != nil {
+		user.Fields = *req.Fields
+	}
+	if req.FeaturedTags != nil {
+		user.FeaturedTags = *req.FeaturedTags
+	}
+	if req.IsBot != nil {
+		user.IsBot = *req.IsBot
+	}
+
+	s.persistLocked()
+	return *user, nil
+}
+
 func (s *SocialService) CreateUser(req CreateUserRequest) (SocialUser, error) {
 	if strings.TrimSpace(req.Handle) == "" {
 		return SocialUser{}, errors.New("handle is required")
@@ -758,6 +803,7 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 		ParentPostID:   parentPostID,
 		RootPostID:     rootPostID,
 		ReplyDepth:     replyDepth,
+		Type:           valueOrDefault(strings.TrimSpace(req.Type), "post"),
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -949,6 +995,32 @@ func (a *App) getUserHandler(w http.ResponseWriter, r *http.Request) {
 	user, err := a.social.GetUser(mux.Vars(r)["id"])
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": user})
+}
+
+func (a *App) updateUserHandler(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := a.requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
+	targetID := mux.Vars(r)["id"]
+	if targetID != authUser.ID {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "you can only update your own profile"})
+		return
+	}
+
+	var req UpdateUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		return
+	}
+
+	user, err := a.social.UpdateUser(targetID, req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": user})

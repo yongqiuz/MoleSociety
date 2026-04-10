@@ -1,4 +1,5 @@
 import { BrowserProvider } from 'ethers';
+import type { UserField } from './socialApi';
 
 export type AuthSession = {
   id: string;
@@ -8,6 +9,9 @@ export type AuthSession = {
   bio: string;
   avatarUrl: string;
   wallet: string;
+  fields: UserField[];
+  featuredTags: string[];
+  isBot: boolean;
 };
 
 type ApiEnvelope<T> = {
@@ -34,9 +38,13 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || 'http://localhost:8080').replace(/\/$/, '');
+const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+const defaultApiUrl = `http://${fallbackHost}:8080`;
+const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || defaultApiUrl).replace(/\/$/, '');
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method || 'GET';
+  console.log(`[Auth] ${method} ${path}`);
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     headers: {
@@ -48,9 +56,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const payload = (await response.json()) as ApiEnvelope<T> | { ok: boolean; error?: string };
   if (!response.ok || !payload.ok) {
+    console.warn(`[Auth] ${method} ${path} → ${response.status}`, payload.error);
     throw new ApiError(payload.error || `Request failed: ${response.status}`, response.status);
   }
 
+  console.log(`[Auth] ${method} ${path} → ${response.status} OK`);
   return (payload as ApiEnvelope<T>).data;
 }
 
@@ -92,5 +102,34 @@ export async function connectWalletAndLogin() {
       nonce: challenge.nonce,
       signature,
     }),
+  });
+}
+
+export async function passwordLogin(identifier: string, password: string) {
+  return request<AuthSession>('/api/v1/auth/password-login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier, password }),
+  });
+}
+
+export async function registerAccount(payload: {
+  username: string;
+  email?: string;
+  password: string;
+  walletAddress?: string;
+  chainId?: number;
+  signature?: string;
+  nonce?: string;
+}) {
+  return request<AuthSession>('/api/v1/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchBindChallenge(walletAddress: string, chainId: number) {
+  return request<ChallengeResponse>('/api/v1/auth/bind-challenge', {
+    method: 'POST',
+    body: JSON.stringify({ walletAddress, chainId }),
   });
 }
