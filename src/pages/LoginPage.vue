@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuth } from '../composables/useAuth';
-import { registerAccount } from '../api/authApi';
+import { ApiError, connectWalletForRegistration, registerAccount } from '../api/authApi';
 import { Mail, Lock, Eye, EyeOff, Wallet, ArrowRight, Hexagon, Sparkles, User, UserPlus } from 'lucide-vue-next';
 
 const router = useRouter();
@@ -39,9 +39,52 @@ function redirectAfterAuth() {
   router.replace(redirect);
 }
 
+function toAuthFriendlyMessage(error: unknown, fallback: string) {
+  if (!(error instanceof ApiError)) {
+    return fallback;
+  }
+
+  switch (error.code) {
+    case 'AUTH_INVALID_PASSWORD':
+      return '密码不对，请再试一次。';
+    case 'AUTH_ACCOUNT_NOT_FOUND':
+      return '没有找到这个账号，请检查后再试。';
+    case 'AUTH_MISSING_CREDENTIALS':
+      return '请先填写账号与密码。';
+    case 'AUTH_WALLET_NOT_BOUND':
+      return '这个钱包还没有绑定账号，请先注册。';
+    case 'AUTH_WALLET_ALREADY_BOUND':
+      return '这个钱包已经绑定过账号了，请换一个钱包，或者直接登录原账号。';
+    case 'AUTH_WALLET_APP_MISSING':
+      return '没有检测到钱包插件，请先安装并解锁钱包。';
+    case 'AUTH_WALLET_CHALLENGE_MISMATCH':
+    case 'AUTH_BIND_CHALLENGE_MISMATCH':
+      return '钱包地址不匹配，请重试。';
+    case 'AUTH_BIND_SIGNATURE_REQUIRED':
+      return '请完成钱包签名后再继续。';
+    case 'AUTH_INVALID_SIGNATURE':
+      return '签名校验失败，请重试。';
+    case 'AUTH_CHALLENGE_EXPIRED':
+      return '签名已过期，请重试。';
+    case 'AUTH_INVALID_JSON':
+    case 'AUTH_INVALID_REQUEST':
+      return '信息填写有误，请检查后再试。';
+    case 'AUTH_MISSING_REGISTRATION_FIELDS':
+      return '请先填写用户名与密码。';
+    case 'AUTH_WEAK_PASSWORD':
+      return '密码强度不够，请换一个更长的密码。';
+    case 'AUTH_USERNAME_TAKEN':
+      return '这个用户名已经被使用了，请换一个。';
+    case 'AUTH_EMAIL_TAKEN':
+      return '这个邮箱已经被使用了，请换一个。';
+    default:
+      return '请稍后再试。';
+  }
+}
+
 async function handleSignIn() {
   if (!loginForm.value.identifier || !loginForm.value.password) {
-    errorMessage.value = '请填写用户名和密码';
+    errorMessage.value = '请先填写账号与密码。';
     return;
   }
   loading.value = true;
@@ -50,7 +93,7 @@ async function handleSignIn() {
     await loginWithPassword(loginForm.value.identifier, loginForm.value.password);
     redirectAfterAuth();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '登录失败';
+    errorMessage.value = toAuthFriendlyMessage(error, '登录失败，请稍后再试。');
   } finally {
     loading.value = false;
   }
@@ -59,26 +102,35 @@ async function handleSignIn() {
 async function handleRegister() {
   const { username, email, password, confirmPassword } = registerForm.value;
   if (!username || !password) {
-    errorMessage.value = '请填写用户名和密码';
+    errorMessage.value = '请先填写用户名与密码。';
     return;
   }
   if (password.length < 6) {
-    errorMessage.value = '密码长度至少 6 位';
+    errorMessage.value = '密码至少 6 位。';
     return;
   }
   if (password !== confirmPassword) {
-    errorMessage.value = '两次输入的密码不一致';
+    errorMessage.value = '两次输入的密码不一致。';
     return;
   }
   loading.value = true;
   errorMessage.value = '';
   try {
-    await registerAccount({ username, email: email || undefined, password });
+    const wallet = await connectWalletForRegistration();
+    await registerAccount({
+      username,
+      email: email || undefined,
+      password,
+      walletAddress: wallet.walletAddress,
+      chainId: wallet.chainId,
+      signature: wallet.signature,
+      nonce: wallet.nonce,
+    });
     // After successful registration, auto-login and redirect
     await loginWithPassword(username, password);
     redirectAfterAuth();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '注册失败';
+    errorMessage.value = toAuthFriendlyMessage(error, '注册失败，请稍后再试。');
   } finally {
     loading.value = false;
   }
@@ -91,7 +143,7 @@ async function signInWithWallet() {
     await login();
     redirectAfterAuth();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '钱包登录失败';
+    errorMessage.value = toAuthFriendlyMessage(error, '钱包登录失败，请稍后再试。');
   } finally {
     loading.value = false;
   }
