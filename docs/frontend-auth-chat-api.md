@@ -1,6 +1,6 @@
 # MoleSociety 前端对接文档（鉴权 + 聊天）
 
-本文档给 Windsurf 对接使用，基于当前后端实现（`backend/auth.go`、`backend/social.go`、`backend/main.go`）。
+本文档给 Windsurf 对接使用，基于当前 Spring Boot 后端实现（`backend/src/main/java/com/molesociety/backend/MoleSocietyApplication.java`）。
 
 ## 1. 基础约定
 

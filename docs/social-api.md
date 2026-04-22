@@ -1,13 +1,13 @@
 # Whale Vault Social API 文档
 
-本文档描述当前 Go 社交后端的接口设计，重点覆盖统一 `posts` 模型、帖子线程 `thread`、回复楼层 `replies`、媒体、会话和实例相关接口。
+本文档描述当前 Spring Boot 社交后端的接口设计，重点覆盖统一 `posts` 模型、帖子线程 `thread`、回复楼层 `replies`、媒体、会话和实例相关接口。
 
 ## 1. 基础信息
 
 - 基础地址：`http://localhost:8080`
 - 内容类型：`application/json`
 - 接口风格：REST
-- 当前后端技术：Go + Gorilla Mux + Redis 快照持久化
+- 当前后端技术：Spring Boot 3.5.x + Maven + PostgreSQL JDBC 主存储 + Redis session / snapshot fallback
 
 所有接口统一返回以下包裹结构：
 

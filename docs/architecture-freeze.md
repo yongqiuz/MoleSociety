@@ -51,10 +51,13 @@
 
 ### 2.2 后端
 
-- Go
-- Gorilla Mux
-- Redis（可选）
-- go-ethereum（Relay / RPC 兼容层）
+- Java 17+
+- Spring Boot 3.5.x
+- Maven
+- PostgreSQL JDBC 主存储
+- Redis session / challenge / snapshot fallback
+- 内存 fallback
+- Relay / RPC 兼容接口
 
 主要职责：
 

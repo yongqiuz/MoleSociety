@@ -215,7 +215,7 @@ try {
     -JobHandle $jobHandle `
     -Name 'backend' `
     -WorkingDirectory $backendDir `
-    -Command 'go run .' `
+    -Command 'mvn spring-boot:run' `
     -StdOutPath (Join-Path $logDir 'backend.out.log') `
     -StdErrPath (Join-Path $logDir 'backend.err.log')
 

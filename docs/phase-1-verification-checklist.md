@@ -20,7 +20,8 @@
 ### 必需
 
 - Node.js / npm
-- Go
+- Java 17+
+- Maven 3.9+
 - PostgreSQL 14+
 
 ### 可选
@@ -49,7 +50,7 @@ SOCIAL_SEED=1
 说明：
 
 - `DB_MIGRATIONS_DIR=./migrations` 是相对于 `backend/` 目录生效的
-- `start-dev.ps1` / `start-dev.cmd` 启动后端时，会以 `backend/` 作为工作目录运行 `go run .`
+- `start-dev.ps1` / `start-dev.cmd` 启动后端时，会以 `backend/` 作为工作目录运行 `mvn spring-boot:run`
 
 ---
 
@@ -85,7 +86,7 @@ start-dev.cmd
 
 - `database.enabled = true`
 - `database.mode = connected`
-- `databaseMode = postgres(pgx)+redis`
+- `databaseMode = postgres(jdbc)+redis`
 - `migrations.count >= 1`
 - `migrations.applied` 包含 `0001_initial_schema.sql`
 

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:frontend": "vite --host 127.0.0.1 --port 4173",
-    "dev:backend": "cd ../backend && go run .",
+    "dev:backend": "cd ../backend && mvn spring-boot:run",
     "dev:all": "concurrently --names \"backend,frontend\" --prefix \"[{name}]\" --prefix-colors \"magenta,cyan\" --kill-others --kill-others-on-fail \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "vue-tsc --noEmit && vite build",
     "lint": "eslint .",

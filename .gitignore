@@ -5,7 +5,7 @@ vendor/
 # Build outputs
 dist/
 *.local
-main
+/main
 *.exe
 *.exe~
 *.dll
@@ -35,3 +35,4 @@ backend/relay.exe
 backend/whale-vault-backend
 backend/my_project_venv/
 backend/venv/
+backend/target/
