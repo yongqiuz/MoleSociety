@@ -1,3 +1,5 @@
+import { ApiError, type ApiEnvelope } from './apiError';
+
 export type UserField = {
   name: string;
   value: string;
@@ -39,6 +41,10 @@ export type SocialPost = {
   visibility: string;
   storageUri: string;
   attestationUri: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
   tags: string[];
   media: PostMedia[] | null;
   type: string;
@@ -127,12 +133,6 @@ export type BootstrapPayload = {
   instances: FederationInstance[];
 };
 
-type ApiEnvelope<T> = {
-  ok: boolean;
-  data: T;
-  error?: string;
-};
-
 type CreateMediaRequest = {
   ownerId: string;
   name: string;
@@ -167,6 +167,12 @@ type CreateMessageRequest = {
   body: string;
 };
 
+type CreateConversationRequest = {
+  title: string;
+  participantIds: string[];
+  encrypted: boolean;
+};
+
 export type UpdateUserRequest = {
   displayName?: string;
   bio?: string;
@@ -176,9 +182,10 @@ export type UpdateUserRequest = {
   isBot?: boolean;
 };
 
-const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
 const defaultApiUrl = `http://${fallbackHost}:8080`;
 const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || defaultApiUrl).replace(/\/$/, '');
+console.log('[API] social base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method || 'GET';
@@ -192,10 +199,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  const payload = (await response.json()) as ApiEnvelope<T> | { ok: boolean; error?: string };
+  const payload = (await response.json()) as ApiEnvelope<T>;
   if (!response.ok || !payload.ok) {
     console.warn(`[API] ${method} ${path} → ${response.status}`, payload.error);
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+    throw new ApiError(payload.error || `Request failed: ${response.status}`, response.status, payload.code, payload.type);
   }
 
   console.log(`[API] ${method} ${path} → ${response.status} OK`);
@@ -239,6 +246,21 @@ export async function createConversationMessage(conversationId: string, payload:
   });
 }
 
+export async function listConversations(limit = 20) {
+  return request<SocialConversation[]>(`/api/v1/social/conversations?limit=${limit}`);
+}
+
+export async function getConversation(conversationId: string) {
+  return request<SocialConversation>(`/api/v1/social/conversations/${conversationId}`);
+}
+
+export async function createConversation(payload: CreateConversationRequest) {
+  return request<SocialConversation>('/api/v1/social/conversations', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function updateUserProfile(userId: string, payload: UpdateUserRequest) {
   return request<SocialUser>(`/api/v1/social/users/${userId}`, {
     method: 'PATCH',
@@ -252,4 +274,3 @@ export async function voteOnPoll(postId: string, optionIndices: number[]) {
     body: JSON.stringify({ optionIndices }),
   });
 }
-

@@ -34,6 +34,55 @@ var (
 	errAuthSessionInvalid = errors.New("invalid session")
 )
 
+type AuthError struct {
+	Code    string `json:"code"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+func (e *AuthError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func newAuthError(code, kind, message string) *AuthError {
+	return &AuthError{Code: code, Type: kind, Message: message}
+}
+
+func isAuthErrorCode(err error, code string) bool {
+	var authErr *AuthError
+	if errors.As(err, &authErr) {
+		return authErr.Code == code
+	}
+	return false
+}
+
+func writeAuthError(w http.ResponseWriter, status int, err error) {
+	var authErr *AuthError
+	if errors.As(err, &authErr) {
+		writeJSON(w, status, map[string]any{
+			"ok":    false,
+			"error": authErr.Message,
+			"code":  authErr.Code,
+			"type":  authErr.Type,
+		})
+		return
+	}
+
+	message := "authentication failed"
+	if err != nil {
+		message = err.Error()
+	}
+	writeJSON(w, status, map[string]any{
+		"ok":    false,
+		"error": message,
+		"code":  "AUTH_UNKNOWN",
+		"type":  "unknown",
+	})
+}
+
 type AuthChallenge struct {
 	Nonce     string `json:"nonce"`
 	Address   string `json:"address"`
@@ -72,6 +121,7 @@ type RegisterRequest struct {
 	Email         string `json:"email"`
 	Password      string `json:"password"`
 	WalletAddress string `json:"walletAddress"`
+	AutoWallet    bool   `json:"autoWallet"`
 	ChainID       int64  `json:"chainId"`
 	Signature     string `json:"signature"`
 	Nonce         string `json:"nonce"`
@@ -111,6 +161,8 @@ type AuthService struct {
 	ctx        context.Context
 	rdb        *redis.Client
 	social     *SocialService
+	store      UserStore
+	userLookup func(string) (*SocialUser, error)
 	mu         sync.Mutex
 	challenges map[string]AuthChallenge
 	sessions   map[string]AuthSessionRecord
@@ -126,11 +178,41 @@ func NewAuthService(ctx context.Context, rdb *redis.Client, social *SocialServic
 		sessions:   map[string]AuthSessionRecord{},
 		accounts:   map[string]Account{},
 	}
-	s.loadAccountsFromRedis()
 	return s
 }
 
+func (s *AuthService) SetStore(store UserStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store = store
+	s.loadAccountsFromRedis()
+}
+
+func (s *AuthService) SetUserLookup(lookup func(string) (*SocialUser, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userLookup = lookup
+}
+
+func (s *AuthService) getUserByIDNoLock(id string) (*SocialUser, error) {
+	if s.userLookup != nil {
+		return s.userLookup(id)
+	}
+	return s.social.GetUser(id)
+}
+
 func (s *AuthService) loadAccountsFromRedis() {
+	if s.store != nil {
+		accounts, err := s.store.ListAuthAccounts(s.ctx)
+		if err == nil && len(accounts) > 0 {
+			for _, acc := range accounts {
+				s.accounts[acc.ID] = acc
+			}
+			log.Printf("loaded %d accounts from store", len(accounts))
+			return
+		}
+	}
+
 	if s.rdb == nil {
 		return
 	}
@@ -149,6 +231,14 @@ func (s *AuthService) loadAccountsFromRedis() {
 }
 
 func (s *AuthService) persistAccountsLocked() {
+	if s.store != nil {
+		for _, acc := range s.accounts {
+			if err := s.store.SaveAuthAccount(s.ctx, acc); err != nil {
+				log.Printf("persist account to store failed: %v", err)
+			}
+		}
+	}
+
 	if s.rdb == nil {
 		return
 	}
@@ -176,7 +266,7 @@ func (a *App) registerAuthRoutes(r *mux.Router) {
 func (a *App) authChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	var req AuthChallengeRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_INVALID_JSON", "validation", "invalid JSON"))
 		return
 	}
 
@@ -191,7 +281,7 @@ func (a *App) authChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	challenge, err := a.auth.CreateChallenge(req.Address, chainID, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		writeAuthError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -201,13 +291,17 @@ func (a *App) authChallengeHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) authVerifyHandler(w http.ResponseWriter, r *http.Request) {
 	var req VerifyWalletRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_INVALID_JSON", "validation", "invalid JSON"))
 		return
 	}
 
 	user, session, err := a.auth.VerifyWalletLogin(req.Address, req.Nonce, req.Signature)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
+		status := http.StatusUnauthorized
+		if isAuthErrorCode(err, "AUTH_WALLET_NOT_BOUND") {
+			status = http.StatusNotFound
+		}
+		writeAuthError(w, status, err)
 		return
 	}
 
@@ -219,11 +313,11 @@ func (a *App) authMeHandler(w http.ResponseWriter, r *http.Request) {
 	user, err := a.optionalAuthenticatedUser(r)
 	if err != nil {
 		clearSessionCookie(w)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
+		writeAuthError(w, http.StatusUnauthorized, err)
 		return
 	}
 	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": errAuthSessionMissing.Error()})
+		writeAuthError(w, http.StatusUnauthorized, newAuthError("AUTH_SESSION_REQUIRED", "session", errAuthSessionMissing.Error()))
 		return
 	}
 
@@ -243,21 +337,25 @@ func (a *App) authLogoutHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) authPasswordLoginHandler(w http.ResponseWriter, r *http.Request) {
 	var req PasswordLoginRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_INVALID_JSON", "validation", "invalid JSON"))
 		return
 	}
 
 	identifier := strings.TrimSpace(req.Identifier)
 	password := strings.TrimSpace(req.Password)
 	if identifier == "" || password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "identifier and password are required"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_MISSING_CREDENTIALS", "validation", "identifier and password are required"))
 		return
 	}
 
 	user, session, err := a.auth.PasswordLogin(identifier, password)
 	if err != nil {
 		log.Printf("password-login failed for %q: %v", identifier, err)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
+		status := http.StatusUnauthorized
+		if isAuthErrorCode(err, "AUTH_ACCOUNT_NOT_FOUND") {
+			status = http.StatusNotFound
+		}
+		writeAuthError(w, status, err)
 		return
 	}
 
@@ -270,25 +368,39 @@ func (a *App) authPasswordLoginHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_INVALID_JSON", "validation", "invalid JSON"))
 		return
 	}
 
 	username := strings.TrimSpace(req.Username)
 	password := strings.TrimSpace(req.Password)
 	if username == "" || password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username and password are required"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_MISSING_REGISTRATION_FIELDS", "validation", "username and password are required"))
 		return
 	}
 	if len(password) < 6 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "password must be at least 6 characters"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_WEAK_PASSWORD", "validation", "password must be at least 6 characters"))
 		return
 	}
 
-	user, session, err := a.auth.Register(username, strings.TrimSpace(req.Email), password, strings.TrimSpace(req.WalletAddress), req.ChainID, req.Nonce, req.Signature, r)
+	user, session, err := a.auth.Register(
+		username,
+		strings.TrimSpace(req.Email),
+		password,
+		strings.TrimSpace(req.WalletAddress),
+		req.AutoWallet,
+		req.ChainID,
+		req.Nonce,
+		req.Signature,
+		r,
+	)
 	if err != nil {
 		log.Printf("register failed for %q: %v", username, err)
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		status := http.StatusBadRequest
+		if isAuthErrorCode(err, "AUTH_USERNAME_TAKEN") || isAuthErrorCode(err, "AUTH_EMAIL_TAKEN") || isAuthErrorCode(err, "AUTH_WALLET_ALREADY_BOUND") {
+			status = http.StatusConflict
+		}
+		writeAuthError(w, status, err)
 		return
 	}
 
@@ -301,7 +413,7 @@ func (a *App) authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) authBindChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	var req BindChallengeRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		writeAuthError(w, http.StatusBadRequest, newAuthError("AUTH_INVALID_JSON", "validation", "invalid JSON"))
 		return
 	}
 
@@ -316,7 +428,7 @@ func (a *App) authBindChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	challenge, err := a.auth.CreateChallenge(req.WalletAddress, chainID, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		writeAuthError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -331,11 +443,11 @@ func (a *App) requireAuthenticatedUser(w http.ResponseWriter, r *http.Request) (
 	user, err := a.optionalAuthenticatedUser(r)
 	if err != nil {
 		clearSessionCookie(w)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
+		writeAuthError(w, http.StatusUnauthorized, err)
 		return nil, false
 	}
 	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": errAuthSessionMissing.Error()})
+		writeAuthError(w, http.StatusUnauthorized, newAuthError("AUTH_SESSION_REQUIRED", "session", errAuthSessionMissing.Error()))
 		return nil, false
 	}
 	return user, true
@@ -382,38 +494,47 @@ func (s *AuthService) VerifyWalletLogin(address, nonce, signature string) (Socia
 		return SocialUser{}, AuthSessionRecord{}, err
 	}
 	if !strings.EqualFold(normalizedAddress, challenge.Address) {
-		return SocialUser{}, AuthSessionRecord{}, errors.New("wallet address does not match login challenge")
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_WALLET_CHALLENGE_MISMATCH", "wallet", "wallet address does not match login challenge")
 	}
 
 	if err := verifyWalletSignature(challenge.Message, signature, challenge.Address); err != nil {
 		return SocialUser{}, AuthSessionRecord{}, err
 	}
 
-	user, err := s.social.EnsureWalletUser(challenge.Address)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	account, ok := s.findAccountByWalletNoLock(challenge.Address)
+	if !ok && s.store != nil {
+		storeAccount, storeOK, storeErr := s.store.FindAuthAccountByWallet(s.ctx, challenge.Address)
+		if storeErr != nil {
+			return SocialUser{}, AuthSessionRecord{}, storeErr
+		}
+		if storeOK {
+			account = storeAccount
+			ok = true
+			s.accounts[account.ID] = account
+		}
+	}
+	if !ok {
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_WALLET_NOT_BOUND", "wallet", "wallet is not bound to any account, please register first")
+	}
+	if strings.TrimSpace(account.UserID) == "" {
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_ACCOUNT_PROFILE_MISSING", "account", "wallet account is missing linked profile")
+	}
+
+	user, err := s.getUserByIDNoLock(account.UserID)
 	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, err
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_LINKED_USER_NOT_FOUND", "account", "linked user not found")
 	}
 
-	now := time.Now().UTC()
-	sessionID, err := randomToken(32)
+	session, err := s.createSessionForUserNoLock(user.ID, account.Wallet)
 	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("generate session: %w", err)
-	}
-
-	session := AuthSessionRecord{
-		ID:        sessionID,
-		UserID:    user.ID,
-		Address:   challenge.Address,
-		CreatedAt: now.Format(time.RFC3339),
-		ExpiresAt: now.Add(authSessionTTL).Format(time.RFC3339),
-	}
-
-	if err := s.saveSession(session); err != nil {
 		return SocialUser{}, AuthSessionRecord{}, err
 	}
 
 	_ = s.deleteChallenge(challenge.Nonce)
-	return user, session, nil
+	return *user, session, nil
 }
 
 // --- Password Login Logic ---
@@ -430,34 +551,40 @@ func (s *AuthService) PasswordLogin(identifier, password string) (SocialUser, Au
 			break
 		}
 	}
+	if account == nil && s.store != nil {
+		accounts, err := s.store.ListAuthAccounts(s.ctx)
+		if err == nil {
+			for _, acc := range accounts {
+				if strings.ToLower(acc.Username) == lowerIdentifier || (acc.Email != "" && strings.ToLower(acc.Email) == lowerIdentifier) {
+					copy := acc
+					account = &copy
+					s.accounts[acc.ID] = acc
+					break
+				}
+			}
+		}
+	}
 	if account == nil {
-		return SocialUser{}, AuthSessionRecord{}, errors.New("account not found")
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_ACCOUNT_NOT_FOUND", "credentials", "account not found")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)); err != nil {
-		return SocialUser{}, AuthSessionRecord{}, errors.New("invalid password")
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_INVALID_PASSWORD", "credentials", "invalid password")
+	}
+	if strings.TrimSpace(account.Wallet) == "" {
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_WALLET_REQUIRED", "account", "account has no bound wallet")
+	}
+	if strings.TrimSpace(account.UserID) == "" {
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_ACCOUNT_PROFILE_MISSING", "account", "account has no linked profile")
 	}
 
-	user, err := s.social.GetUser(account.UserID)
+	user, err := s.getUserByIDNoLock(account.UserID)
 	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, errors.New("linked user not found")
+		return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_LINKED_USER_NOT_FOUND", "account", "linked user not found")
 	}
 
-	now := time.Now().UTC()
-	sessionID, err := randomToken(32)
+	session, err := s.createSessionForUserNoLock(user.ID, account.Wallet)
 	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("generate session: %w", err)
-	}
-
-	session := AuthSessionRecord{
-		ID:        sessionID,
-		UserID:    user.ID,
-		Address:   account.Wallet,
-		CreatedAt: now.Format(time.RFC3339),
-		ExpiresAt: now.Add(authSessionTTL).Format(time.RFC3339),
-	}
-
-	if err := s.saveSession(session); err != nil {
 		return SocialUser{}, AuthSessionRecord{}, err
 	}
 
@@ -465,15 +592,18 @@ func (s *AuthService) PasswordLogin(identifier, password string) (SocialUser, Au
 }
 
 // --- Register + Bind Wallet Logic ---
-func (s *AuthService) Register(username, email, password, walletAddress string, chainID int64, nonce, signature string, r *http.Request) (SocialUser, AuthSessionRecord, error) {
+func (s *AuthService) Register(username, email, password, walletAddress string, autoWallet bool, chainID int64, nonce, signature string, r *http.Request) (SocialUser, AuthSessionRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	trimmedWalletAddress := strings.TrimSpace(walletAddress)
+	useAutoWallet := autoWallet || trimmedWalletAddress == ""
 
 	// Check username uniqueness
 	lowerUsername := strings.ToLower(username)
 	for _, acc := range s.accounts {
 		if strings.ToLower(acc.Username) == lowerUsername {
-			return SocialUser{}, AuthSessionRecord{}, errors.New("username already taken")
+			return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_USERNAME_TAKEN", "conflict", "username already taken")
 		}
 	}
 
@@ -482,41 +612,52 @@ func (s *AuthService) Register(username, email, password, walletAddress string, 
 		lowerEmail := strings.ToLower(email)
 		for _, acc := range s.accounts {
 			if acc.Email != "" && strings.ToLower(acc.Email) == lowerEmail {
-				return SocialUser{}, AuthSessionRecord{}, errors.New("email already registered")
+				return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_EMAIL_TAKEN", "conflict", "email already registered")
 			}
 		}
 	}
 
-	// If wallet is provided, verify signature
-	normalizedWallet := ""
-	if walletAddress != "" {
-		var err error
-		normalizedWallet, err = normalizeWalletAddress(walletAddress)
+	var (
+		normalizedWallet string
+		err              error
+	)
+	if useAutoWallet {
+		autoGeneratedWallet, err := s.createUniqueAutoWalletNoLock()
 		if err != nil {
 			return SocialUser{}, AuthSessionRecord{}, err
 		}
-
-		// Check wallet uniqueness
-		for _, acc := range s.accounts {
-			if strings.EqualFold(acc.Wallet, normalizedWallet) {
-				return SocialUser{}, AuthSessionRecord{}, errors.New("wallet already bound to another account")
-			}
+		normalizedWallet = autoGeneratedWallet
+	} else {
+		if strings.TrimSpace(nonce) == "" || strings.TrimSpace(signature) == "" {
+			return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_BIND_SIGNATURE_REQUIRED", "validation", "wallet binding nonce and signature are required")
 		}
 
+		normalizedWallet, err = normalizeWalletAddress(trimmedWalletAddress)
+		if err != nil {
+			return SocialUser{}, AuthSessionRecord{}, err
+		}
+	}
+
+	// Check wallet uniqueness
+	for _, acc := range s.accounts {
+		if strings.EqualFold(acc.Wallet, normalizedWallet) {
+			return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_WALLET_ALREADY_BOUND", "conflict", "wallet already bound to another account")
+		}
+	}
+
+	if !useAutoWallet {
 		// Verify bind challenge signature
-		if nonce != "" && signature != "" {
-			challenge, err := s.getChallengeNoLock(nonce)
-			if err != nil {
-				return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("bind challenge: %w", err)
-			}
-			if !strings.EqualFold(normalizedWallet, challenge.Address) {
-				return SocialUser{}, AuthSessionRecord{}, errors.New("wallet address does not match bind challenge")
-			}
-			if err := verifyWalletSignature(challenge.Message, signature, challenge.Address); err != nil {
-				return SocialUser{}, AuthSessionRecord{}, err
-			}
-			_ = s.deleteChallengeNoLock(nonce)
+		challenge, err := s.getChallengeNoLock(nonce)
+		if err != nil {
+			return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("bind challenge: %w", err)
 		}
+		if !strings.EqualFold(normalizedWallet, challenge.Address) {
+			return SocialUser{}, AuthSessionRecord{}, newAuthError("AUTH_BIND_CHALLENGE_MISMATCH", "wallet", "wallet address does not match bind challenge")
+		}
+		if err := verifyWalletSignature(challenge.Message, signature, challenge.Address); err != nil {
+			return SocialUser{}, AuthSessionRecord{}, err
+		}
+		_ = s.deleteChallengeNoLock(nonce)
 	}
 
 	// Hash password
@@ -525,18 +666,8 @@ func (s *AuthService) Register(username, email, password, walletAddress string, 
 		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("hash password: %w", err)
 	}
 
-	// Create social user
-	user, err := s.social.CreateUser(CreateUserRequest{
-		Handle:      username,
-		DisplayName: username,
-		Bio:         "MoleSociety member",
-		Instance:    "vault.social",
-		Wallet:      normalizedWallet,
-	})
-	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("create user: %w", err)
-	}
-
+	// Create social user + auth account in one DB transaction when PostgreSQL is active
+	var user SocialUser
 	now := time.Now().UTC()
 	accountID := "acc_" + fmt.Sprintf("%d", now.UnixNano())
 	account := Account{
@@ -545,33 +676,103 @@ func (s *AuthService) Register(username, email, password, walletAddress string, 
 		Email:        email,
 		PasswordHash: string(hash),
 		Wallet:       normalizedWallet,
-		UserID:       user.ID,
 		Status:       "active",
 		CreatedAt:    now.Format(time.RFC3339),
 		UpdatedAt:    now.Format(time.RFC3339),
 	}
+	if pgStore, ok := s.store.(*PostgresUserStore); ok {
+		user, account, err = pgStore.CreateWithAccount(s.ctx, CreateUserRequest{
+			Handle:      username,
+			DisplayName: username,
+			Bio:         "MoleSociety member",
+			Instance:    "vault.social",
+			Wallet:      normalizedWallet,
+		}, account)
+	} else if s.store != nil {
+		user, err = s.store.Create(s.ctx, CreateUserRequest{
+			Handle:      username,
+			DisplayName: username,
+			Bio:         "MoleSociety member",
+			Instance:    "vault.social",
+			Wallet:      normalizedWallet,
+		})
+		account.UserID = user.ID
+	} else {
+		user, err = s.social.CreateUser(CreateUserRequest{
+			Handle:      username,
+			DisplayName: username,
+			Bio:         "MoleSociety member",
+			Instance:    "vault.social",
+			Wallet:      normalizedWallet,
+		})
+		account.UserID = user.ID
+	}
+	if err != nil {
+		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("create user: %w", err)
+	}
+
 	s.accounts[accountID] = account
-	s.persistAccountsLocked()
+	if _, ok := s.store.(*PostgresUserStore); !ok {
+		s.persistAccountsLocked()
+	}
 
 	// Create session
+	session, err := s.createSessionForUserNoLock(user.ID, normalizedWallet)
+	if err != nil {
+		return SocialUser{}, AuthSessionRecord{}, err
+	}
+
+	storedUser, err := s.getUserByIDNoLock(user.ID)
+	if err != nil {
+		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("reload user: %w", err)
+	}
+
+	return *storedUser, session, nil
+}
+
+func (s *AuthService) createUniqueAutoWalletNoLock() (string, error) {
+	for i := 0; i < 5; i++ {
+		privateKey, err := crypto.GenerateKey()
+		if err != nil {
+			return "", newAuthError("AUTH_AUTO_WALLET_FAILED", "wallet", "failed to create wallet")
+		}
+		address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
+		if _, exists := s.findAccountByWalletNoLock(address); !exists {
+			return address, nil
+		}
+	}
+	return "", newAuthError("AUTH_AUTO_WALLET_FAILED", "wallet", "failed to create wallet")
+}
+
+func (s *AuthService) findAccountByWalletNoLock(wallet string) (Account, bool) {
+	for _, acc := range s.accounts {
+		if strings.EqualFold(strings.TrimSpace(acc.Wallet), strings.TrimSpace(wallet)) {
+			return acc, true
+		}
+	}
+	return Account{}, false
+}
+
+func (s *AuthService) createSessionForUserNoLock(userID, wallet string) (AuthSessionRecord, error) {
+	now := time.Now().UTC()
 	sessionID, err := randomToken(32)
 	if err != nil {
-		return SocialUser{}, AuthSessionRecord{}, fmt.Errorf("generate session: %w", err)
+		return AuthSessionRecord{}, fmt.Errorf("generate session: %w", err)
 	}
 
 	session := AuthSessionRecord{
 		ID:        sessionID,
-		UserID:    user.ID,
-		Address:   normalizedWallet,
+		UserID:    userID,
+		Address:   wallet,
 		CreatedAt: now.Format(time.RFC3339),
 		ExpiresAt: now.Add(authSessionTTL).Format(time.RFC3339),
 	}
 
 	if err := s.saveSession(session); err != nil {
-		return SocialUser{}, AuthSessionRecord{}, err
+		return AuthSessionRecord{}, err
 	}
 
-	return user, session, nil
+	return session, nil
 }
 
 func (s *AuthService) UserFromRequest(r *http.Request) (*SocialUser, error) {
@@ -596,7 +797,7 @@ func (s *AuthService) UserFromRequest(r *http.Request) (*SocialUser, error) {
 		return nil, err
 	}
 
-	user, err := s.social.GetUser(session.UserID)
+	user, err := s.getUserByIDNoLock(session.UserID)
 	if err != nil {
 		_ = s.DeleteSession(sessionID)
 		return nil, errAuthSessionInvalid
@@ -876,7 +1077,7 @@ func setSessionCookie(w http.ResponseWriter, sessionID string) {
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sessionCookieSameSite(),
 		Secure:   sessionCookieSecure(),
 		MaxAge:   int(authSessionTTL.Seconds()),
 	})
@@ -888,13 +1089,23 @@ func clearSessionCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sessionCookieSameSite(),
 		Secure:   sessionCookieSecure(),
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
 }
 
+func sessionCookieSameSite() http.SameSite {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("COOKIE_SAMESITE")), "none") {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
 func sessionCookieSecure() bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("COOKIE_SAMESITE")), "none") {
+		return true
+	}
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("COOKIE_SECURE")), "true")
 }

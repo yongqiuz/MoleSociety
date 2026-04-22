@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuth } from '../composables/useAuth';
-import { ApiError, connectWalletForRegistration, registerAccount } from '../api/authApi';
+import { ApiError, registerAccount } from '../api/authApi';
 import { Mail, Lock, Eye, EyeOff, Wallet, ArrowRight, Hexagon, Sparkles, User, UserPlus } from 'lucide-vue-next';
 
 const router = useRouter();
@@ -41,6 +41,10 @@ function redirectAfterAuth() {
 
 function toAuthFriendlyMessage(error: unknown, fallback: string) {
   if (!(error instanceof ApiError)) {
+    const anyErr = error as any;
+    if (anyErr?.code === 'AUTH_INVALID_PASSWORD') return '密码不对，请再试一次。';
+    if (anyErr?.code === 'AUTH_ACCOUNT_NOT_FOUND') return '没有找到这个账号。';
+    if (anyErr?.code === 'AUTH_WALLET_REQUIRED') return '这个账号需要先完成钱包关联。';
     return fallback;
   }
 
@@ -48,7 +52,9 @@ function toAuthFriendlyMessage(error: unknown, fallback: string) {
     case 'AUTH_INVALID_PASSWORD':
       return '密码不对，请再试一次。';
     case 'AUTH_ACCOUNT_NOT_FOUND':
-      return '没有找到这个账号，请检查后再试。';
+      return '没有找到这个账号。';
+    case 'AUTH_WALLET_REQUIRED':
+      return '这个账号需要先完成钱包关联。';
     case 'AUTH_MISSING_CREDENTIALS':
       return '请先填写账号与密码。';
     case 'AUTH_WALLET_NOT_BOUND':
@@ -72,13 +78,13 @@ function toAuthFriendlyMessage(error: unknown, fallback: string) {
     case 'AUTH_MISSING_REGISTRATION_FIELDS':
       return '请先填写用户名与密码。';
     case 'AUTH_WEAK_PASSWORD':
-      return '密码强度不够，请换一个更长的密码。';
+      return '密码至少需要 6 位。';
     case 'AUTH_USERNAME_TAKEN':
       return '这个用户名已经被使用了，请换一个。';
     case 'AUTH_EMAIL_TAKEN':
       return '这个邮箱已经被使用了，请换一个。';
     default:
-      return '请稍后再试。';
+      return '登录没有成功，请稍后再试。';
   }
 }
 
@@ -93,6 +99,14 @@ async function handleSignIn() {
     await loginWithPassword(loginForm.value.identifier, loginForm.value.password);
     redirectAfterAuth();
   } catch (error) {
+    const anyErr = error as any;
+    console.error('[LOGIN CATCH]', {
+      message: anyErr?.message,
+      code: anyErr?.code,
+      type: anyErr?.type,
+      status: anyErr?.status,
+      raw: anyErr,
+    });
     errorMessage.value = toAuthFriendlyMessage(error, '登录失败，请稍后再试。');
   } finally {
     loading.value = false;
@@ -116,20 +130,23 @@ async function handleRegister() {
   loading.value = true;
   errorMessage.value = '';
   try {
-    const wallet = await connectWalletForRegistration();
     await registerAccount({
       username,
       email: email || undefined,
       password,
-      walletAddress: wallet.walletAddress,
-      chainId: wallet.chainId,
-      signature: wallet.signature,
-      nonce: wallet.nonce,
+      autoWallet: true,
     });
-    // After successful registration, auto-login and redirect
-    await loginWithPassword(username, password);
+    // 后端已自动写 Cookie，直接跳转
     redirectAfterAuth();
   } catch (error) {
+    const anyErr = error as any;
+    console.error('[LOGIN CATCH]', {
+      message: anyErr?.message,
+      code: anyErr?.code,
+      type: anyErr?.type,
+      status: anyErr?.status,
+      raw: anyErr,
+    });
     errorMessage.value = toAuthFriendlyMessage(error, '注册失败，请稍后再试。');
   } finally {
     loading.value = false;
@@ -143,6 +160,14 @@ async function signInWithWallet() {
     await login();
     redirectAfterAuth();
   } catch (error) {
+    const anyErr = error as any;
+    console.error('[LOGIN CATCH]', {
+      message: anyErr?.message,
+      code: anyErr?.code,
+      type: anyErr?.type,
+      status: anyErr?.status,
+      raw: anyErr,
+    });
     errorMessage.value = toAuthFriendlyMessage(error, '钱包登录失败，请稍后再试。');
   } finally {
     loading.value = false;

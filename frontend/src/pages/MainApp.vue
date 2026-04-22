@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
+  createConversation,
   createConversationMessage,
   createMediaAsset,
   createPost,
@@ -9,13 +10,16 @@ import {
   fetchPostThread,
   fetchSocialBootstrap,
   fetchSocialBootstrapMine,
+  voteOnPoll,
   type BootstrapPayload,
   type FederationInstance,
   type MediaAsset,
   type SocialConversation,
   type SocialPost,
   type SocialUser,
+  type Poll,
 } from '../api/socialApi';
+import { ApiError } from '../api/apiError';
 import { useAuth } from '../composables/useAuth';
 import type { Component } from 'vue';
 import {
@@ -29,8 +33,10 @@ import { useAppearance, type AppearanceSettings, type ColorScheme } from '../com
 
 type Section =
   | 'home'
+  | 'myFeed'
   | 'postDetail'
   | 'explore'
+  | 'messages'
   | 'notifications'
   | 'lists'
   | 'topics'
@@ -68,6 +74,10 @@ type FeedCard = {
   bio?: string;
   tags: string[];
   chainProof: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
   media?: {
     name: string;
     preview: string;
@@ -106,12 +116,16 @@ type ConversationCard = {
   name: string;
   handle: string;
   status: string;
+  avatarLabel: string;
+  participantId?: string;
   messages: MessageCard[];
 };
 
 const primaryNavItems: { label: string; key: Section; icon: Component }[] = [
   { label: '主页', key: 'home', icon: Home },
   { label: '当前热门', key: 'explore', icon: TrendingUp },
+  { label: '消息', key: 'messages', icon: Mail },
+  { label: '我的内容', key: 'myFeed', icon: User },
   { label: '通知', key: 'notifications', icon: Bell },
 ];
 
@@ -222,6 +236,8 @@ const fallbackConversations: ConversationCard[] = [
     name: 'Archive Curator',
     handle: '@curator@vault.social',
     status: '回退模式',
+    avatarLabel: 'A',
+    participantId: 'user_archive',
     messages: [
       {
         id: 'local-message',
@@ -237,6 +253,7 @@ const currentSection = ref<Section>('home');
 const currentUser = ref<SocialUser | null>(null);
 const people = ref<SocialUser[]>([]);
 const posts = ref<FeedCard[]>([]);
+const myPosts = ref<FeedCard[]>([]);
 const assets = ref<AssetCard[]>([]);
 const conversations = ref<ConversationCard[]>([]);
 const instances = ref<FederationInstance[]>([]);
@@ -323,7 +340,21 @@ const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === selectedConversationId.value),
 );
 
+const activeConversationPeer = computed(() => {
+  const conversation = activeConversation.value;
+  if (!conversation) return null;
+  return people.value.find((person) => person.id === conversation.participantId) ?? null;
+});
+
 const mediaCount = computed(() => posts.value.filter((post) => post.media).length + assets.value.length);
+
+const myTimeline = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return myPosts.value;
+  return myPosts.value.filter((post) =>
+    [post.author, post.handle, post.content, ...post.tags].join(' ').toLowerCase().includes(query),
+  );
+});
 
 const timeline = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -371,6 +402,10 @@ const currentSectionInfo = computed(() => {
   
   if (currentSection.value === 'postDetail') {
     return { label: '摩文详情', icon: MessageCircle };
+  }
+
+  if (currentSection.value === 'myFeed') {
+    return { label: '我的内容', icon: User };
   }
   
   return { label: '更多', icon: MoreHorizontal };
@@ -488,6 +523,26 @@ function shortProof(proof: string) {
   return proof.length > 36 ? `${proof.slice(0, 16)}...${proof.slice(-10)}` : proof;
 }
 
+function shortAddress(address: string) {
+  if (!address) return '';
+  return address.length > 18 ? `${address.slice(0, 10)}...${address.slice(-8)}` : address;
+}
+
+function proofLabel(proof: string) {
+  if (!proof) return '等待存证';
+  if (proof.startsWith('attestation://')) return 'Attestation';
+  if (proof.startsWith('ipfs://')) return 'IPFS';
+  if (proof.startsWith('ar://')) return 'Arweave';
+  if (proof.startsWith('local://')) return '本地预览';
+  return 'Hash Proof';
+}
+
+function proofStatus(proof: string) {
+  if (!proof || proof.includes('pending')) return '待上链';
+  if (proof.startsWith('local://')) return '本地草稿';
+  return '已上链';
+}
+
 // toneClass removed - moved to AppearanceSettings.vue
 
 // settings functions removed - moved to SettingsPage.vue / AppearanceSettings.vue
@@ -564,7 +619,11 @@ function toFeedCard(post: SocialPost): FeedCard {
     interaction: post.interaction || 'anyone',
     bio: person?.bio,
     tags: post.tags,
-    chainProof: post.attestationUri || post.storageUri || 'unverified://pending',
+    chainProof: post.txHash || post.attestationUri || post.storageUri || 'unverified://pending',
+    chainId: post.chainId,
+    txHash: post.txHash,
+    contractAddress: post.contractAddress,
+    explorerUrl: post.explorerUrl,
     media: firstMedia
       ? {
           name: firstMedia.name,
@@ -595,11 +654,38 @@ function toAssetCard(asset: MediaAsset): AssetCard {
 }
 
 function toConversationCard(conversation: SocialConversation, userId: string | null): ConversationCard {
+  const participantIds = [...new Set(conversation.participantIds.filter(Boolean))];
+  const otherParticipantIds = participantIds.filter((id) => id !== userId);
+  const participantUsers = participantIds
+    .map((participantId) => people.value.find((person) => person.id === participantId))
+    .filter((person): person is SocialUser => Boolean(person));
+  const otherParticipants = otherParticipantIds
+    .map((participantId) => people.value.find((person) => person.id === participantId))
+    .filter((person): person is SocialUser => Boolean(person));
+
+  const fallbackPeer = participantUsers.find((person) => person.id !== userId) ?? otherParticipants[0] ?? null;
+  const displayParticipants = otherParticipants.length ? otherParticipants : fallbackPeer ? [fallbackPeer] : [];
+
+  const resolvedTitle =
+    conversation.title.trim() ||
+    displayParticipants.map((person) => person.displayName).join('、') ||
+    otherParticipantIds.join(', ') ||
+    participantIds.join(', ') ||
+    '新会话';
+
+  const resolvedHandle =
+    displayParticipants.map((person) => `${person.handle}@${person.instance}`).join(', ') ||
+    (fallbackPeer ? `${fallbackPeer.handle}@${fallbackPeer.instance}` : '') ||
+    otherParticipantIds.join(', ') ||
+    participantIds.join(', ');
+
   return {
     id: conversation.id,
-    name: conversation.title,
-    handle: conversation.participantIds.join(', '),
+    name: resolvedTitle,
+    handle: resolvedHandle,
     status: conversation.encrypted ? '端到端加密会话' : '标准会话',
+    avatarLabel: avatarText(resolvedTitle),
+    participantId: fallbackPeer?.id,
     messages: conversation.messages.map((message) => ({
       id: message.id,
       from: message.senderId === userId ? 'me' : 'peer',
@@ -609,16 +695,95 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
   };
 }
 
+function findDirectConversationWith(userId: string) {
+  return conversations.value.find((conversation) => conversation.participantId === userId);
+}
+
+async function startConversation(targetUser: SocialUser) {
+  if (!currentUser.value || saving.value) return;
+
+  const existingConversation = findDirectConversationWith(targetUser.id);
+  if (existingConversation) {
+    selectedConversationId.value = existingConversation.id;
+    currentSection.value = 'messages';
+    errorMessage.value = '';
+    return;
+  }
+
+  saving.value = true;
+  try {
+    if (apiOnline.value) {
+      const createdConversation = await createConversation({
+        title: targetUser.displayName,
+        participantIds: [targetUser.id],
+        encrypted: false,
+      });
+
+      const mappedConversation = toConversationCard(createdConversation, currentUser.value.id);
+      conversations.value = [mappedConversation, ...conversations.value.filter((item) => item.id !== mappedConversation.id)];
+      selectedConversationId.value = mappedConversation.id;
+    } else {
+      const localConversation: ConversationCard = {
+        id: `local-conversation-${Date.now()}`,
+        name: targetUser.displayName,
+        handle: `${targetUser.handle}@${targetUser.instance}`,
+        status: '本地草稿会话',
+        avatarLabel: avatarText(targetUser.displayName),
+        participantId: targetUser.id,
+        messages: [],
+      };
+      conversations.value = [localConversation, ...conversations.value];
+      selectedConversationId.value = localConversation.id;
+    }
+
+    currentSection.value = 'messages';
+    messageDraft.value = '';
+    errorMessage.value = '';
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = error instanceof Error ? error.message : '暂时无法创建会话';
+  } finally {
+    saving.value = false;
+  }
+}
+
 function applyBootstrap(payload: BootstrapPayload) {
   currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? fallbackUser;
   people.value = payload.users.length ? payload.users : fallbackPeople;
   posts.value = payload.feed.map(toFeedCard);
   assets.value = payload.media.map(toAssetCard);
-  conversations.value = payload.conversations.map((conversation) =>
+  const mappedConversations = payload.conversations.map((conversation) =>
     toConversationCard(conversation, currentUser.value?.id ?? null),
   );
+  const dedupedConversations = mappedConversations.filter(
+    (conversation, index, list) =>
+      index ===
+      list.findIndex(
+        (item) => item.id === conversation.id || (!!item.participantId && item.participantId === conversation.participantId),
+      ),
+  );
+  conversations.value = dedupedConversations;
   instances.value = payload.instances.length ? payload.instances : fallbackInstances;
   selectedConversationId.value = conversations.value[0]?.id ?? '';
+}
+
+async function loadMyFeed() {
+  if (!authSession.value) {
+    myPosts.value = [];
+    return;
+  }
+
+  try {
+    const payload = await fetchSocialBootstrapMine();
+    myPosts.value = payload.feed.map(toFeedCard);
+  } catch {
+    myPosts.value = currentUser.value
+      ? posts.value.filter((post) => post.author === currentUser.value?.displayName || post.handle === currentUser.value?.handle)
+      : [];
+  }
 }
 
 function applyFallback(message: string) {
@@ -627,6 +792,7 @@ function applyFallback(message: string) {
   currentUser.value = resolveAuthenticatedUser(fallbackPeople) ?? fallbackUser;
   people.value = fallbackPeople;
   posts.value = fallbackPosts;
+  myPosts.value = fallbackPosts.filter((post) => post.author === currentUser.value?.displayName || post.handle === currentUser.value?.handle);
   assets.value = fallbackAssets;
   conversations.value = fallbackConversations;
   instances.value = fallbackInstances;
@@ -715,13 +881,23 @@ function saveVisibilitySettings() {
 }
 
 async function loadBootstrap() {
+  if (!authSession.value) {
+    await router.replace({ path: '/login', query: { redirect: '/app' } });
+    return;
+  }
+
   loading.value = true;
   try {
-    const payload = await fetchSocialBootstrapMine();
+    const payload = await fetchSocialBootstrap();
     applyBootstrap(payload);
+    await loadMyFeed();
     apiOnline.value = true;
     errorMessage.value = '';
   } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      await router.replace({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
     const message = error instanceof Error ? error.message : '暂时无法连接社区服务';
     applyFallback(message);
   } finally {
@@ -988,7 +1164,11 @@ async function publishPost() {
     mediaPreview.value = null;
     mediaMeta.value = null;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '发布内容失败';
+    if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '发布没有成功，请稍后再试。';
   } finally {
     saving.value = false;
   }
@@ -1035,7 +1215,25 @@ async function sendMessage() {
     messageDraft.value = '';
     errorMessage.value = '';
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '发送消息失败';
+    if (error instanceof ApiError) {
+      if (error.code === 'AUTH_SESSION_REQUIRED') {
+        void router.push({ path: '/login', query: { redirect: '/app' } });
+        return;
+      }
+
+      if (typeof error.message === 'string') {
+        if (error.message.includes('the other user has not followed you back yet')) {
+          errorMessage.value = '对方还没有关注你，暂时不能回复。';
+          return;
+        }
+        if (error.message.includes('awaiting follow-back: only one message is allowed')) {
+          errorMessage.value = '在对方关注你之前，只能先发送一条消息。';
+          return;
+        }
+      }
+    }
+
+    errorMessage.value = '发送没有成功，请稍后再试。';
   } finally {
     saving.value = false;
   }
@@ -1094,16 +1292,15 @@ onMounted(loadBootstrap);
             <div class="rounded-[22px] border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-4">
               <!-- Visibility Selection Button -->
               <div class="mb-4 flex flex-wrap gap-2">
-                <button 
+                <button
                   @click="openVisibilityModal"
                   class="group flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
                   title="控制可见性和互动权限"
                 >
                   <component :is="selectedVisibilityItem.icon" class="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
-                  <span>{{ selectedVisibilityItem.label }}，{{ selectedInteractionItem.label === '任何人' ? '允许引用' : interaction === 'followers' ? '关注者可引用' : '禁止引用' }}</span>
+                  <span>{{ selectedVisibilityItem.label }}，{{ interaction === 'everyone' ? '允许引用' : interaction === 'followers' ? '关注者可引用' : '禁止引用' }}</span>
                   <ChevronDown class="w-4 h-4 opacity-50 ml-1" />
                 </button>
-
               </div>
 
               <textarea
@@ -1204,7 +1401,7 @@ onMounted(loadBootstrap);
               </div>
             </div>
 
-            </div>
+          </div>
         </aside>
 
         <main class="bg-[var(--frame-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar">
@@ -1268,10 +1465,35 @@ onMounted(loadBootstrap);
 
                   <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
                     <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
-                    <div class="flex items-center justify-between px-4 py-3 text-sm text-[color:var(--text-secondary)]">
-                      <span>{{ post.media.name }}</span>
-                      <span>{{ post.media.sizeLabel }}</span>
+                  </div>
+
+                  <div v-if="post.media && (post.contractAddress || post.txHash)" class="mt-3 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3">
+                    <div class="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-400">链上凭证</div>
+                        <div class="mt-1 text-xs text-[color:var(--text-muted)]">真实链上写入结果</div>
+                      </div>
+                      <a
+                        v-if="post.explorerUrl"
+                        :href="post.explorerUrl"
+                        target="_blank"
+                        rel="noreferrer"
+                        class="text-xs font-medium text-emerald-300 transition hover:text-emerald-200"
+                      >
+                        在区块浏览器查看
+                      </a>
                     </div>
+                    <div class="mt-3 grid gap-3 sm:grid-cols-2">
+                      <div v-if="post.contractAddress" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
+                        <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">合约地址</div>
+                        <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ post.contractAddress }}</div>
+                      </div>
+                      <div v-if="post.txHash" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
+                        <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">交易哈希</div>
+                        <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ post.txHash }}</div>
+                      </div>
+                    </div>
+                    <div v-if="post.chainId" class="mt-3 text-xs text-[color:var(--text-muted)]">链 ID：{{ post.chainId }}</div>
                   </div>
 
                   <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
@@ -1439,7 +1661,6 @@ onMounted(loadBootstrap);
                           <span class="opacity-30">·</span>
                           <span v-if="new Date(threadFocusPost.poll.expiresAt) > new Date()">剩余时间: {{ formatTimestamp(threadFocusPost.poll.expiresAt) }}</span>
                         </div>
-                        <button @click="refreshPost(threadFocusPost.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新票数</button>
                       </div>
                     </div>
 
@@ -1472,7 +1693,6 @@ onMounted(loadBootstrap);
                           <span class="opacity-30">·</span>
                           <span>{{ new Date(threadFocusPost.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
                         </div>
-                        <button @click="refreshPost(threadFocusPost.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新</button>
                       </div>
                     </div>
 
@@ -1481,10 +1701,35 @@ onMounted(loadBootstrap);
                       class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]"
                     >
                       <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[420px] w-full object-cover" />
-                      <div class="flex items-center justify-between px-4 py-3 text-sm text-[color:var(--text-secondary)]">
-                        <span>{{ threadFocusPost.media.name }}</span>
-                        <span>{{ threadFocusPost.media.sizeLabel }}</span>
+                    </div>
+
+                    <div v-if="threadFocusPost.media && (threadFocusPost.contractAddress || threadFocusPost.txHash)" class="mt-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-4">
+                      <div class="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-400">链上凭证</div>
+                          <div class="mt-1 text-xs text-[color:var(--text-muted)]">真实链上写入结果</div>
+                        </div>
+                        <a
+                          v-if="threadFocusPost.explorerUrl"
+                          :href="threadFocusPost.explorerUrl"
+                          target="_blank"
+                          rel="noreferrer"
+                          class="text-xs font-medium text-emerald-300 transition hover:text-emerald-200"
+                        >
+                          在区块浏览器查看
+                        </a>
                       </div>
+                      <div class="mt-3 grid gap-3 md:grid-cols-2">
+                        <div v-if="threadFocusPost.contractAddress" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
+                          <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">合约地址</div>
+                          <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ threadFocusPost.contractAddress }}</div>
+                        </div>
+                        <div v-if="threadFocusPost.txHash" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
+                          <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">交易哈希</div>
+                          <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ threadFocusPost.txHash }}</div>
+                        </div>
+                      </div>
+                      <div v-if="threadFocusPost.chainId" class="mt-3 text-xs text-[color:var(--text-muted)]">链 ID：{{ threadFocusPost.chainId }}</div>
                     </div>
 
                     <div v-if="threadFocusPost.tags.length" class="mt-4 flex flex-wrap gap-2">
@@ -1664,6 +1909,36 @@ onMounted(loadBootstrap);
             </div>
           </section>
 
+          <section v-else-if="currentSection === 'myFeed'" class="divide-y divide-[color:var(--border-color)]">
+            <article v-if="myTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
+              你发布的摩文会显示在这里。
+            </article>
+            <article v-for="post in myTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+              <div class="flex gap-3">
+                <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
+                  {{ avatarText(post.author) }}
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                    <span class="text-sm text-[color:var(--text-secondary)]">{{ post.handle }}@{{ post.instance }}</span>
+                    <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
+                  </div>
+                  <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
+                  <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
+                  <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
+                  </div>
+                  <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
+                    <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
+                      #{{ tag }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </section>
+
           <section v-else-if="currentSection === 'explore'">
             <!-- Tab Navigation (Now part of the explore content) -->
             <div class="px-6 pt-2 pb-6 border-b border-[color:var(--border-color)]">
@@ -1839,12 +2114,21 @@ onMounted(loadBootstrap);
                         <div class="mt-2 line-clamp-2 text-base leading-relaxed text-[color:var(--text-secondary)]">{{ person.bio }}</div>
                       </div>
                     </div>
-                    <button
-                      @click="toggleFollow(person.id)"
-                      class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-emerald-500 shrink-0"
-                    >
-                      {{ followedUsers[person.id] ? '已关注' : '关注' }}
-                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <button
+                        @click="startConversation(person)"
+                        class="inline-flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/8 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-500/12 hover:text-emerald-200"
+                      >
+                        <MessageCircle class="h-4 w-4" />
+                        <span>发消息</span>
+                      </button>
+                      <button
+                        @click="toggleFollow(person.id)"
+                        class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-emerald-500"
+                      >
+                        {{ followedUsers[person.id] ? '已关注' : '关注' }}
+                      </button>
+                    </div>
                   </div>
                 </article>
               </template>
@@ -1957,6 +2241,140 @@ onMounted(loadBootstrap);
                   </div>
                 </article>
               </template>
+            </div>
+          </section>
+
+          <section v-else-if="currentSection === 'messages'" class="h-[calc(100vh-140px)] overflow-hidden">
+            <div class="grid h-full min-h-0 lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]">
+              <aside class="flex min-h-0 flex-col border-b border-[color:var(--border-color)] bg-[var(--panel-soft)] lg:border-b-0 lg:border-r">
+                <div class="border-b border-[color:var(--border-color)] px-5 py-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-xl font-semibold text-[color:var(--text-primary)]">消息</div>
+                      <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择一个联系人开始聊天</div>
+                    </div>
+                    <div class="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                      {{ conversations.length }} 条消息
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="conversations.length === 0" class="px-5 py-10 text-sm text-[color:var(--text-muted)]">
+                  还没有私信消息，去“当前热门 → 用户”里点击“发消息”开始第一段聊天。
+                </div>
+
+                <div v-else class="min-h-0 flex-1 overflow-y-auto divide-y divide-[color:var(--border-color)]">
+                  <button
+                    v-for="conversation in conversations"
+                    :key="conversation.id"
+                    @click="selectedConversationId = conversation.id"
+                    class="flex w-full items-start gap-3 px-5 py-4 text-left transition hover:bg-[var(--chip-hover)]"
+                    :class="selectedConversationId === conversation.id ? 'bg-emerald-500/10' : ''"
+                  >
+                    <div class="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                      {{ conversation.avatarLabel }}
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center justify-between gap-3">
+                        <div class="truncate text-[15px] font-semibold text-[color:var(--text-primary)]">{{ conversation.name }}</div>
+                        <div class="shrink-0 text-xs text-[color:var(--text-muted)]">{{ conversation.messages[conversation.messages.length - 1]?.time || '' }}</div>
+                      </div>
+                      <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ conversation.handle }}</div>
+                      <div class="mt-2 truncate text-sm text-[color:var(--text-muted)]">
+                        {{ conversation.messages[conversation.messages.length - 1]?.text || '还没有消息，开始打个招呼吧。' }}
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </aside>
+
+              <div class="flex min-h-0 flex-col bg-[var(--frame-bg)]">
+                <template v-if="activeConversation">
+                  <div class="flex shrink-0 items-center gap-4 border-b border-[color:var(--border-color)] px-6 py-5">
+                    <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                      {{ activeConversation.avatarLabel }}
+                    </div>
+                    <div class="min-w-0">
+                      <div class="truncate text-lg font-semibold text-[color:var(--text-primary)]">{{ activeConversation.name }}</div>
+                      <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ activeConversation.handle }}</div>
+                    </div>
+                  </div>
+
+                  <div class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+                    <div class="space-y-4">
+                      <div
+                        v-for="message in activeConversation.messages"
+                        :key="message.id"
+                        class="flex items-end gap-3"
+                        :class="message.from === 'me' ? 'justify-end' : 'justify-start'"
+                      >
+                        <template v-if="message.from === 'peer'">
+                          <div class="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-sm font-bold text-slate-900">
+                            {{ activeConversation.avatarLabel }}
+                          </div>
+                          <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm leading-6 text-[color:var(--text-primary)] shadow-sm">
+                            <div>{{ message.text }}</div>
+                            <div class="mt-2 text-[11px] text-[color:var(--text-muted)]">{{ message.time }}</div>
+                          </div>
+                        </template>
+
+                        <template v-else>
+                          <div class="max-w-[75%] rounded-[22px] rounded-br-md bg-emerald-600 px-4 py-3 text-sm leading-6 text-white shadow-[0_10px_30px_rgba(16,185,129,0.22)]">
+                            <div>{{ message.text }}</div>
+                            <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>
+                          </div>
+                          <div class="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                            {{ avatarText(currentUser?.displayName || 'U') }}
+                          </div>
+                        </template>
+                      </div>
+
+                      <div v-if="activeConversation.messages.length === 0" class="flex min-h-[240px] items-center justify-center">
+                        <div class="rounded-3xl border border-dashed border-[color:var(--border-color)] px-8 py-10 text-center text-sm text-[color:var(--text-muted)]">
+                          还没有消息，先发一句“你好”吧。
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="shrink-0 border-t border-[color:var(--border-color)] bg-[var(--panel-soft)] px-6 py-5">
+                    <div class="flex items-end gap-4">
+                      <div class="flex h-11 w-11 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                        {{ avatarText(currentUser?.displayName || 'U') }}
+                      </div>
+                      <div class="min-w-0 flex-1 rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-4 py-3">
+                        <textarea
+                          v-model="messageDraft"
+                          rows="3"
+                          maxlength="1000"
+                          placeholder="输入消息..."
+                          class="w-full resize-none bg-transparent text-sm leading-6 text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
+                        />
+                        <div class="mt-3 flex items-center justify-between gap-3">
+                          <div class="text-xs text-[color:var(--text-muted)]">{{ messageDraft.trim().length }}/1000</div>
+                          <button
+                            :disabled="!messageDraft.trim() || saving"
+                            @click="sendMessage"
+                            class="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {{ saving ? '发送中...' : '发送消息' }}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <div v-else class="flex h-full items-center justify-center px-6 py-16 text-center text-[color:var(--text-muted)]">
+                  <div>
+                    <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-400">
+                      <Mail class="h-8 w-8" />
+                    </div>
+                    <div class="mt-5 text-lg font-semibold text-[color:var(--text-primary)]">请选择一条消息</div>
+                    <div class="mt-2 text-sm">点击左侧联系人后，这里会切换成聊天室。</div>
+                  </div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -2097,7 +2515,7 @@ onMounted(loadBootstrap);
                 <button
                   v-if="isLoggedIn"
                   @click="goToLogout"
-                  class="flex w-full items-center gap-3 rounded-[1.2rem] px-3 py-2.5 text-base font-medium text-[color:var(--text-secondary)] transition-all hover:translate-x-1 hover:bg-[var(--chip-hover)]"
+                  class="flex w-full items-center gap-3 rounded-[1.2rem] px-3 py-2.5 text-base font-medium text-[color:var(--text-secondary)] transition hover:translate-x-1 hover:bg-[var(--chip-hover)]"
                 >
                   <LogOut class="w-5 h-5 stroke-[1.5]" />
                   <span>退出登录</span>
@@ -2108,152 +2526,29 @@ onMounted(loadBootstrap);
         </aside>
       </div>
     </div>
-
-    <!-- Visibility and Interaction Modal -->
-    <Transition name="modal">
-      <div v-if="showVisibilityModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4">
-        <!-- Backdrop -->
-        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="showVisibilityModal = false"></div>
-        
-        <!-- Modal Content -->
-        <div class="relative w-full max-w-lg flex flex-col max-h-[90vh] overflow-hidden rounded-[2.5rem] border border-[color:var(--border-color)] bg-[var(--panel-bg)] shadow-2xl transition-all">
-          <!-- Header -->
-          <div class="flex items-center justify-between border-b border-[color:var(--border-color)] px-8 py-6">
-            <h3 class="text-xl font-bold text-[color:var(--text-primary)]">可见性和互动</h3>
-            <button @click="showVisibilityModal = false" class="rounded-full p-2 text-[color:var(--text-muted)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]">
-              <X class="w-6 h-6" />
-            </button>
-          </div>
-
-          <!-- Body -->
-          <div class="p-8 space-y-8 flex-1 overflow-y-auto no-scrollbar">
-            <p class="text-[15px] leading-relaxed text-[color:var(--text-secondary)]">
-              控制谁可以和此摩文互动。你也可以前往<span class="text-emerald-400 hover:underline cursor-pointer">偏好设置 > 发布默认值</span>将此设置应用到全部未来发布的摩文。
-            </p>
-
-            <!-- Visibility Selection -->
-            <div class="space-y-3">
-              <label class="block text-sm font-bold uppercase tracking-widest text-[color:var(--text-muted)]">可见性</label>
-              <div class="relative">
-                <button 
-                  @click="showVisibilityDropdown = !showVisibilityDropdown"
-                  class="flex w-full items-center justify-between rounded-3xl border border-[color:var(--border-color)] bg-[var(--chip-bg)] px-6 py-4 transition-all hover:bg-[var(--chip-hover)]"
-                  :class="showVisibilityDropdown ? 'border-emerald-500/50 ring-1 ring-emerald-500/50' : ''"
-                >
-                  <div class="flex items-center gap-4">
-                    <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-lg shadow-emerald-900/40">
-                      <component :is="visibilityOptions.find(o => o.id === tempVisibility).icon" class="w-5 h-5" />
-                    </div>
-                    <div class="text-left font-bold text-[color:var(--text-primary)]">
-                      {{ visibilityOptions.find(o => o.id === tempVisibility).label }}
-                    </div>
-                  </div>
-                  <ChevronDown class="w-5 h-5 text-[color:var(--text-muted)] transition-transform" :class="{ 'rotate-180': showVisibilityDropdown }" />
-                </button>
-
-                <!-- Custom Visibility Dropdown -->
-                <Transition name="dropdown">
-                  <div v-if="showVisibilityDropdown" class="absolute left-0 right-0 z-[110] mt-2 overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-muted)] shadow-2xl">
-                    <div class="max-h-80 overflow-y-auto no-scrollbar py-2">
-                      <button 
-                        v-for="opt in visibilityOptions" 
-                        :key="opt.id"
-                        @click="tempVisibility = opt.id; showVisibilityDropdown = false"
-                        class="flex w-full items-center gap-4 px-6 py-4 text-left transition-all hover:bg-[var(--chip-hover)]"
-                        :class="tempVisibility === opt.id ? 'bg-emerald-500/10' : ''"
-                      >
-                        <div class="flex h-10 w-10 flex-none items-center justify-center rounded-xl transition-all"
-                          :class="tempVisibility === opt.id ? 'bg-emerald-500 text-white' : 'bg-[var(--chip-bg)] text-[color:var(--text-muted)]'"
-                        >
-                          <component :is="opt.icon" class="w-5 h-5" />
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <div class="font-bold text-[color:var(--text-primary)]">{{ opt.label }}</div>
-                          <div class="text-sm text-[color:var(--text-muted)] line-clamp-1">{{ opt.description }}</div>
-                        </div>
-                        <div v-if="tempVisibility === opt.id" class="text-emerald-500">
-                          <CheckSquare class="w-5 h-5" />
-                        </div>
-                      </button>
-                    </div>
-                  </div>
-                </Transition>
-              </div>
-            </div>
-
-            <!-- Interaction Selection -->
-            <div class="space-y-3 pt-2">
-              <label class="block text-sm font-bold uppercase tracking-widest text-[color:var(--text-muted)]">谁可以引用</label>
-              <div class="relative">
-                <button 
-                  @click="showInteractionDropdown = !showInteractionDropdown"
-                  class="flex w-full items-center justify-between rounded-3xl border border-[color:var(--border-color)] bg-[var(--chip-bg)] px-6 py-4 transition-all hover:bg-[var(--chip-hover)]"
-                  :class="showInteractionDropdown ? 'border-emerald-500/50 ring-1 ring-emerald-500/50' : ''"
-                >
-                  <div class="font-bold text-[color:var(--text-primary)]">
-                    {{ interactionOptions.find(o => o.id === tempInteraction).label }}
-                  </div>
-                  <ChevronDown class="w-5 h-5 text-[color:var(--text-muted)] transition-transform" :class="{ 'rotate-180': showInteractionDropdown }" />
-                </button>
-
-                <!-- Custom Interaction Dropdown -->
-                <Transition name="dropdown">
-                  <div v-if="showInteractionDropdown" class="absolute left-0 right-0 z-[110] mt-2 overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-muted)] shadow-2xl">
-                    <div class="max-h-60 overflow-y-auto no-scrollbar py-2">
-                      <button 
-                        v-for="opt in interactionOptions" 
-                        :key="opt.id"
-                        @click="tempInteraction = opt.id; showInteractionDropdown = false"
-                        class="flex w-full items-center justify-between px-6 py-4 text-left transition-all hover:bg-[var(--chip-hover)]"
-                        :class="tempInteraction === opt.id ? 'bg-emerald-500/10 text-emerald-500 font-bold' : 'text-[color:var(--text-primary)]'"
-                      >
-                        <span>{{ opt.label }}</span>
-                        <CheckSquare v-if="tempInteraction === opt.id" class="w-5 h-5" />
-                      </button>
-                    </div>
-                  </div>
-                </Transition>
-              </div>
-            </div>
-          </div>
-
-          <!-- Footer -->
-          <div class="flex items-center justify-end gap-4 border-t border-[color:var(--border-color)] bg-[var(--app-bg)]/50 px-8 py-6">
-            <button 
-              @click="showVisibilityModal = false"
-              class="rounded-2xl px-8 py-3 text-lg font-bold text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
-            >
-              取消
-            </button>
-            <button 
-              @click="saveVisibilitySettings"
-              class="rounded-2xl bg-emerald-600 px-10 py-3 text-lg font-bold text-white shadow-xl transition shadow-emerald-900/40 hover:bg-emerald-500 hover:-translate-y-0.5"
-            >
-              保存
-            </button>
-          </div>
-        </div>
-      </div>
-    </Transition>
   </div>
 </template>
 
 <style scoped>
-.modal-enter-active,
-.modal-leave-active {
-  transition: opacity 0.3s ease;
-}
+  .modal-enter-active,
+  .modal-leave-active {
+    transition: opacity 0.3s ease;
+  }
 
-.modal-enter-from,
-.modal-leave-to {
-  opacity: 0;
-}
+  .modal-enter-from,
+  .modal-leave-to {
+    opacity: 0;
+  }
 
-.modal-enter-active .relative,
-.modal-leave-active .relative {
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
+  .modal-enter-active .relative,
+  .modal-leave-active .relative {
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
 
+  .modal-enter-from .relative,
+  .modal-leave-to .relative {
+    transform: scale(0.9) translateY(20px);
+  }
 .modal-enter-from .relative,
 .modal-leave-to .relative {
   transform: scale(0.9) translateY(20px);

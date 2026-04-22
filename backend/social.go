@@ -67,35 +67,39 @@ type PollOption struct {
 }
 
 type Poll struct {
-	Options      []PollOption `json:"options"`
-	ExpiresAt    string       `json:"expiresAt"`
-	Multiple     bool         `json:"multiple"`
-	Voters       []string     `json:"voters"`
+	Options   []PollOption `json:"options"`
+	ExpiresAt string       `json:"expiresAt"`
+	Multiple  bool         `json:"multiple"`
+	Voters    []string     `json:"voters"`
 }
 
 type SocialPost struct {
-	ID             string      `json:"id"`
-	AuthorID       string      `json:"authorId"`
-	AuthorHandle   string      `json:"authorHandle"`
-	AuthorName     string      `json:"authorName"`
-	Instance       string      `json:"instance"`
-	Kind           string      `json:"kind"`
-	Content        string      `json:"content"`
-	Visibility     string      `json:"visibility"`
-	StorageURI     string      `json:"storageUri"`
-	AttestationURI string      `json:"attestationUri"`
-	Tags           []string    `json:"tags"`
-	Media          []PostMedia `json:"media"`
-	ParentPostID   string      `json:"parentPostId,omitempty"`
-	RootPostID     string      `json:"rootPostId,omitempty"`
-	ReplyDepth     int         `json:"replyDepth,omitempty"`
-	Replies        int         `json:"replies"`
-	Boosts         int         `json:"boosts"`
-	Likes          int         `json:"likes"`
-	Type           string      `json:"type"`
-	Interaction    string      `json:"interaction"`
-	Poll           *Poll       `json:"poll,omitempty"`
-	CreatedAt      string      `json:"createdAt"`
+	ID              string      `json:"id"`
+	AuthorID        string      `json:"authorId"`
+	AuthorHandle    string      `json:"authorHandle"`
+	AuthorName      string      `json:"authorName"`
+	Instance        string      `json:"instance"`
+	Kind            string      `json:"kind"`
+	Content         string      `json:"content"`
+	Visibility      string      `json:"visibility"`
+	StorageURI      string      `json:"storageUri"`
+	AttestationURI  string      `json:"attestationUri"`
+	ChainID         string      `json:"chainId,omitempty"`
+	TxHash          string      `json:"txHash,omitempty"`
+	ContractAddress string      `json:"contractAddress,omitempty"`
+	ExplorerURL     string      `json:"explorerUrl,omitempty"`
+	Tags            []string    `json:"tags"`
+	Media           []PostMedia `json:"media"`
+	ParentPostID    string      `json:"parentPostId,omitempty"`
+	RootPostID      string      `json:"rootPostId,omitempty"`
+	ReplyDepth      int         `json:"replyDepth,omitempty"`
+	Replies         int         `json:"replies"`
+	Boosts          int         `json:"boosts"`
+	Likes           int         `json:"likes"`
+	Type            string      `json:"type"`
+	Interaction     string      `json:"interaction"`
+	Poll            *Poll       `json:"poll,omitempty"`
+	CreatedAt       string      `json:"createdAt"`
 }
 
 type PostThread struct {
@@ -117,9 +121,17 @@ type Conversation struct {
 	ID             string        `json:"id"`
 	Title          string        `json:"title"`
 	ParticipantIDs []string      `json:"participantIds"`
+	InitiatorID    string        `json:"initiatorId,omitempty"`
 	Encrypted      bool          `json:"encrypted"`
 	Messages       []ChatMessage `json:"messages"`
 	UpdatedAt      string        `json:"updatedAt"`
+}
+
+type PostAttestationResult struct {
+	ChainID         string
+	TxHash          string
+	ContractAddress string
+	ExplorerURL     string
 }
 
 type FederationInstance struct {
@@ -177,21 +189,21 @@ type CreateMediaRequest struct {
 }
 
 type CreatePostRequest struct {
-	AuthorID       string      `json:"authorId"`
-	Kind           string      `json:"kind"`
-	Content        string      `json:"content"`
-	Visibility     string      `json:"visibility"`
-	Type           string      `json:"type"`
-	Interaction    string      `json:"interaction"`
-	StorageURI     string      `json:"storageUri"`
-	AttestationURI string      `json:"attestationUri"`
-	Tags           []string    `json:"tags"`
-	MediaIDs       []string    `json:"mediaIds"`
-	ParentPostID   string      `json:"parentPostId"`
-	RootPostID     string      `json:"rootPostId"`
-	PollOptions    []string    `json:"pollOptions"`
-	PollExpiresIn  int         `json:"pollExpiresIn"` // in minutes
-	PollMultiple   bool        `json:"pollMultiple"`
+	AuthorID       string   `json:"authorId"`
+	Kind           string   `json:"kind"`
+	Content        string   `json:"content"`
+	Visibility     string   `json:"visibility"`
+	Type           string   `json:"type"`
+	Interaction    string   `json:"interaction"`
+	StorageURI     string   `json:"storageUri"`
+	AttestationURI string   `json:"attestationUri"`
+	Tags           []string `json:"tags"`
+	MediaIDs       []string `json:"mediaIds"`
+	ParentPostID   string   `json:"parentPostId"`
+	RootPostID     string   `json:"rootPostId"`
+	PollOptions    []string `json:"pollOptions"`
+	PollExpiresIn  int      `json:"pollExpiresIn"` // in minutes
+	PollMultiple   bool     `json:"pollMultiple"`
 }
 
 type CreateConversationRequest struct {
@@ -214,6 +226,7 @@ type SocialService struct {
 	media         []MediaAsset
 	conversations []Conversation
 	instances     []FederationInstance
+	follows       map[string]map[string]bool
 }
 
 func NewSocialService(ctx context.Context, rdb *redis.Client) *SocialService {
@@ -243,13 +256,17 @@ func (s *SocialService) load() {
 }
 
 func shouldSeedSocialDefaults() bool {
-	// Default OFF to ensure you start from a clean chain-owned repository.
 	value := strings.TrimSpace(os.Getenv("SOCIAL_SEED"))
-	if value == "" {
+	if value != "" {
+		value = strings.ToLower(value)
+		return value == "1" || value == "true" || value == "yes" || value == "on"
+	}
+
+	if isProductionEnvironment() {
 		return false
 	}
-	value = strings.ToLower(value)
-	return value == "1" || value == "true" || value == "yes" || value == "on"
+
+	return true
 }
 
 func (s *SocialService) Reset(seed bool) {
@@ -284,6 +301,7 @@ func (s *SocialService) loadSnapshotsFromRedis() bool {
 	var media []MediaAsset
 	var conversations []Conversation
 	var instances []FederationInstance
+	var follows map[string]map[string]bool
 
 	loaders := []struct {
 		key    string
@@ -294,6 +312,7 @@ func (s *SocialService) loadSnapshotsFromRedis() bool {
 		{key: "social:snapshot:media", target: &media},
 		{key: "social:snapshot:conversations", target: &conversations},
 		{key: "social:snapshot:instances", target: &instances},
+		{key: "social:snapshot:follows", target: &follows},
 	}
 
 	for _, loader := range loaders {
@@ -311,6 +330,10 @@ func (s *SocialService) loadSnapshotsFromRedis() bool {
 	s.media = media
 	s.conversations = conversations
 	s.instances = instances
+	if follows == nil {
+		follows = map[string]map[string]bool{}
+	}
+	s.follows = follows
 	s.normalizePostsLocked()
 	return true
 }
@@ -391,8 +414,7 @@ func (s *SocialService) seedDefaults() {
 	}
 
 	s.posts = []SocialPost{
-		{
-		},
+		{},
 		{
 			ID:             "post_librarian",
 			AuthorID:       "user_librarian",
@@ -514,6 +536,7 @@ func (s *SocialService) seedDefaults() {
 			ID:             "conv_curator",
 			Title:          "Archive Curator",
 			ParticipantIDs: []string{"user_archive", "user_librarian"},
+			InitiatorID:    "user_archive",
 			Encrypted:      true,
 			UpdatedAt:      now.Add(-15 * time.Minute).Format(time.RFC3339),
 			Messages: []ChatMessage{
@@ -537,6 +560,19 @@ func (s *SocialService) seedDefaults() {
 		},
 	}
 
+	s.follows = map[string]map[string]bool{
+		"user_archive": {
+			"user_librarian": true,
+			"user_fedilab":   true,
+		},
+		"user_librarian": {
+			"user_archive": true,
+		},
+		"user_fedilab": {
+			"user_archive": true,
+		},
+	}
+
 	s.normalizePostsLocked()
 	s.sortLocked()
 }
@@ -552,6 +588,7 @@ func (s *SocialService) persistLocked() {
 		"social:snapshot:media":         s.media,
 		"social:snapshot:conversations": s.conversations,
 		"social:snapshot:instances":     s.instances,
+		"social:snapshot:follows":       s.follows,
 	}
 
 	for key, value := range snapshots {
@@ -612,12 +649,13 @@ func (s *SocialService) Bootstrap(limit int, currentUserID string) BootstrapPayl
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	filteredConversations := sliceConversationsByParticipant(s.conversations, limit, currentUserID)
 	payload := BootstrapPayload{
-		Stats:         SocialStats{Users: len(s.users), Posts: len(s.posts), MediaAssets: len(s.media), Conversations: len(s.conversations)},
+		Stats:         SocialStats{Users: len(s.users), Posts: len(s.posts), MediaAssets: len(s.media), Conversations: len(filteredConversations)},
 		Feed:          append([]SocialPost(nil), sliceTopLevelPosts(s.posts, limit)...),
 		Users:         append([]SocialUser(nil), s.users...),
 		Media:         append([]MediaAsset(nil), sliceMedia(s.media, limit)...),
-		Conversations: append([]Conversation(nil), sliceConversations(s.conversations, limit)...),
+		Conversations: append([]Conversation(nil), filteredConversations...),
 		Instances:     append([]FederationInstance(nil), s.instances...),
 	}
 	if strings.TrimSpace(currentUserID) != "" {
@@ -638,12 +676,13 @@ func (s *SocialService) BootstrapMine(limit int, currentUserID string) Bootstrap
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	filteredConversations := sliceConversationsByParticipant(s.conversations, limit, currentUserID)
 	payload := BootstrapPayload{
-		Stats:         SocialStats{Users: len(s.users), Posts: len(s.posts), MediaAssets: len(s.media), Conversations: len(s.conversations)},
+		Stats:         SocialStats{Users: len(s.users), Posts: len(s.posts), MediaAssets: len(s.media), Conversations: len(filteredConversations)},
 		Feed:          append([]SocialPost(nil), sliceTopLevelPostsByAuthor(s.posts, limit, currentUserID)...),
 		Users:         append([]SocialUser(nil), s.users...),
 		Media:         append([]MediaAsset(nil), sliceMedia(s.media, limit)...),
-		Conversations: append([]Conversation(nil), sliceConversations(s.conversations, limit)...),
+		Conversations: append([]Conversation(nil), filteredConversations...),
 		Instances:     append([]FederationInstance(nil), s.instances...),
 	}
 	if strings.TrimSpace(currentUserID) != "" {
@@ -664,6 +703,29 @@ func (s *SocialService) ListInstances() []FederationInstance {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]FederationInstance(nil), s.instances...)
+}
+
+func (s *SocialService) ListConversations(limit int, currentUserID string) []Conversation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]Conversation(nil), sliceConversationsByParticipant(s.conversations, limit, currentUserID)...)
+}
+
+func sliceConversationsByParticipant(conversations []Conversation, limit int, currentUserID string) []Conversation {
+	currentUserID = strings.TrimSpace(currentUserID)
+	if currentUserID == "" {
+		return sliceConversations(conversations, limit)
+	}
+	filtered := make([]Conversation, 0, len(conversations))
+	for _, conversation := range conversations {
+		for _, participantID := range conversation.ParticipantIDs {
+			if participantID == currentUserID {
+				filtered = append(filtered, conversation)
+				break
+			}
+		}
+	}
+	return sliceConversations(filtered, limit)
 }
 
 func (s *SocialService) ListUsers() []SocialUser {
@@ -911,18 +973,22 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 	}
 
 	post := SocialPost{
-		ID:             nextID("post"),
-		AuthorID:       author.ID,
-		AuthorHandle:   author.Handle,
-		AuthorName:     author.DisplayName,
-		Instance:       author.Instance,
-		Kind:           kind,
-		Content:        strings.TrimSpace(req.Content),
-		Visibility:     valueOrDefault(strings.TrimSpace(req.Visibility), "public"),
-		StorageURI:     storageURI,
-		AttestationURI: strings.TrimSpace(req.AttestationURI),
-		Tags:           req.Tags,
-		Media:          attachments,
+		ID:              nextID("post"),
+		AuthorID:        author.ID,
+		AuthorHandle:    author.Handle,
+		AuthorName:      author.DisplayName,
+		Instance:        author.Instance,
+		Kind:            kind,
+		Content:         strings.TrimSpace(req.Content),
+		Visibility:      valueOrDefault(strings.TrimSpace(req.Visibility), "public"),
+		StorageURI:      storageURI,
+		AttestationURI:  strings.TrimSpace(req.AttestationURI),
+		ChainID:         "",
+		TxHash:          "",
+		ContractAddress: "",
+		ExplorerURL:     "",
+		Tags:            req.Tags,
+		Media:           attachments,
 		ParentPostID:   parentPostID,
 		RootPostID:     rootPostID,
 		ReplyDepth:     replyDepth,
@@ -936,7 +1002,7 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 		if expiresIn <= 0 {
 			expiresIn = 1440 // 1 day default
 		}
-		
+
 		poll := &Poll{
 			Options:   make([]PollOption, len(req.PollOptions)),
 			ExpiresAt: time.Now().UTC().Add(time.Duration(expiresIn) * time.Minute).Format(time.RFC3339),
@@ -959,25 +1025,25 @@ func (s *SocialService) CreatePost(req CreatePostRequest) (SocialPost, error) {
 func buildLocalStorageURI(req CreatePostRequest) string {
 	// Deterministic digest for your own repository even before you wire external storage.
 	canonical := map[string]any{
-		"authorId":     strings.TrimSpace(req.AuthorID),
-		"content":      strings.TrimSpace(req.Content),
-		"tags":         req.Tags,
-		"mediaIds":     req.MediaIDs,
-		"parentPostId": strings.TrimSpace(req.ParentPostID),
-		"rootPostId":   strings.TrimSpace(req.RootPostID),
-		"visibility":   strings.TrimSpace(req.Visibility),
-		"type":         strings.TrimSpace(req.Type),
-		"interaction":  strings.TrimSpace(req.Interaction),
-		"pollOptions":  req.PollOptions,
+		"authorId":      strings.TrimSpace(req.AuthorID),
+		"content":       strings.TrimSpace(req.Content),
+		"tags":          req.Tags,
+		"mediaIds":      req.MediaIDs,
+		"parentPostId":  strings.TrimSpace(req.ParentPostID),
+		"rootPostId":    strings.TrimSpace(req.RootPostID),
+		"visibility":    strings.TrimSpace(req.Visibility),
+		"type":          strings.TrimSpace(req.Type),
+		"interaction":   strings.TrimSpace(req.Interaction),
+		"pollOptions":   req.PollOptions,
 		"pollExpiresIn": req.PollExpiresIn,
-		"pollMultiple": req.PollMultiple,
+		"pollMultiple":  req.PollMultiple,
 	}
 	raw, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("sha256://%x", sum[:])
 }
 
-func (s *SocialService) SetPostAttestation(postID string, uri string) (SocialPost, error) {
+func (s *SocialService) SetPostAttestation(postID string, result PostAttestationResult) (SocialPost, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -985,8 +1051,11 @@ func (s *SocialService) SetPostAttestation(postID string, uri string) (SocialPos
 	if idx == -1 {
 		return SocialPost{}, errors.New("post not found: " + postID)
 	}
-	uri = strings.TrimSpace(uri)
-	s.posts[idx].AttestationURI = uri
+	s.posts[idx].AttestationURI = strings.TrimSpace(result.TxHash)
+	s.posts[idx].ChainID = strings.TrimSpace(result.ChainID)
+	s.posts[idx].TxHash = strings.TrimSpace(result.TxHash)
+	s.posts[idx].ContractAddress = strings.TrimSpace(result.ContractAddress)
+	s.posts[idx].ExplorerURL = strings.TrimSpace(result.ExplorerURL)
 	s.persistLocked()
 	return s.posts[idx], nil
 }
@@ -1093,9 +1162,16 @@ func (s *SocialService) GetConversation(id string) (*Conversation, error) {
 	return nil, errors.New("conversation not found: " + id)
 }
 
-func (s *SocialService) CreateConversation(req CreateConversationRequest) (Conversation, error) {
+func (s *SocialService) CreateConversation(initiatorID string, req CreateConversationRequest) (Conversation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if strings.TrimSpace(initiatorID) == "" {
+		return Conversation{}, errors.New("initiator is required")
+	}
+	if _, err := s.findUserLocked(initiatorID); err != nil {
+		return Conversation{}, err
+	}
 
 	for _, participantID := range req.ParticipantIDs {
 		if _, err := s.findUserLocked(participantID); err != nil {
@@ -1103,10 +1179,30 @@ func (s *SocialService) CreateConversation(req CreateConversationRequest) (Conve
 		}
 	}
 
+	participantSet := map[string]bool{}
+	for _, participantID := range req.ParticipantIDs {
+		trimmed := strings.TrimSpace(participantID)
+		if trimmed != "" {
+			participantSet[trimmed] = true
+		}
+	}
+	participantSet[initiatorID] = true
+
+	participantIDs := make([]string, 0, len(participantSet))
+	for participantID := range participantSet {
+		participantIDs = append(participantIDs, participantID)
+	}
+	sort.Strings(participantIDs)
+
+	if len(participantIDs) != 2 {
+		return Conversation{}, errors.New("conversation requires exactly two participants")
+	}
+
 	conversation := Conversation{
 		ID:             nextID("conv"),
 		Title:          valueOrDefault(strings.TrimSpace(req.Title), "New Conversation"),
-		ParticipantIDs: append([]string(nil), req.ParticipantIDs...),
+		ParticipantIDs: participantIDs,
+		InitiatorID:    initiatorID,
 		Encrypted:      req.Encrypted,
 		Messages:       []ChatMessage{},
 		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -1141,6 +1237,31 @@ func (s *SocialService) AddMessage(conversationID string, req CreateMessageReque
 		}
 		if !isParticipant {
 			return Conversation{}, errors.New("sender is not a participant in this conversation")
+		}
+
+		participants := s.conversations[i].ParticipantIDs
+		if len(participants) != 2 {
+			return Conversation{}, errors.New("conversation must contain exactly two participants")
+		}
+
+		var peerID string
+		if participants[0] == sender.ID {
+			peerID = participants[1]
+		} else {
+			peerID = participants[0]
+		}
+
+		mutualFollow := s.isFollowingLocked(sender.ID, peerID) && s.isFollowingLocked(peerID, sender.ID)
+		if !mutualFollow {
+			if s.conversations[i].InitiatorID == "" {
+				s.conversations[i].InitiatorID = sender.ID
+			}
+			if sender.ID != s.conversations[i].InitiatorID {
+				return Conversation{}, errors.New("the other user has not followed you back yet")
+			}
+			if len(s.conversations[i].Messages) >= 1 {
+				return Conversation{}, errors.New("awaiting follow-back: only one message is allowed")
+			}
 		}
 
 		message := ChatMessage{
@@ -1187,6 +1308,65 @@ func (s *SocialService) Distribution() []map[string]any {
 	return result
 }
 
+func (s *SocialService) FollowUser(followerID, targetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	followerID = strings.TrimSpace(followerID)
+	targetID = strings.TrimSpace(targetID)
+	if followerID == "" || targetID == "" {
+		return errors.New("follow user id is required")
+	}
+	if followerID == targetID {
+		return errors.New("cannot follow yourself")
+	}
+	if _, err := s.findUserLocked(followerID); err != nil {
+		return err
+	}
+	if _, err := s.findUserLocked(targetID); err != nil {
+		return err
+	}
+
+	if s.follows == nil {
+		s.follows = map[string]map[string]bool{}
+	}
+	if s.follows[followerID] == nil {
+		s.follows[followerID] = map[string]bool{}
+	}
+	s.follows[followerID][targetID] = true
+
+	s.persistLocked()
+	return nil
+}
+
+func (s *SocialService) UnfollowUser(followerID, targetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.follows == nil {
+		return nil
+	}
+	if s.follows[followerID] != nil {
+		delete(s.follows[followerID], targetID)
+		if len(s.follows[followerID]) == 0 {
+			delete(s.follows, followerID)
+		}
+	}
+	s.persistLocked()
+	return nil
+}
+
+func (s *SocialService) isFollowingLocked(followerID, targetID string) bool {
+	if s.follows == nil {
+		return false
+	}
+	targets := s.follows[followerID]
+	if targets == nil {
+		return false
+	}
+	return targets[targetID]
+}
+
 func (a *App) bootstrapHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 10)
 	currentUser, _ := a.optionalAuthenticatedUser(r)
@@ -1196,11 +1376,12 @@ func (a *App) bootstrapHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	mineRaw := strings.TrimSpace(r.URL.Query().Get("mine"))
 	mine := mineRaw == "1" || strings.EqualFold(mineRaw, "true") || strings.EqualFold(mineRaw, "yes") || strings.EqualFold(mineRaw, "on")
-	if mine {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.BootstrapMine(limit, currentUserID)})
+	payload, err := a.store.Social.Bootstrap(a.ctx, a.social, limit, currentUserID, mine)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.Bootstrap(limit, currentUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": payload})
 }
 
 func (a *App) instancesHandler(w http.ResponseWriter, _ *http.Request) {
@@ -1208,7 +1389,12 @@ func (a *App) instancesHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) listUsersHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.ListUsers()})
+	users, err := a.store.Social.ListUsers(a.ctx, a.social)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": users})
 }
 
 func (a *App) createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -1217,7 +1403,7 @@ func (a *App) createUserHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
 		return
 	}
-	user, err := a.social.CreateUser(req)
+	user, err := a.store.Users.Create(a.ctx, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1226,7 +1412,7 @@ func (a *App) createUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) getUserHandler(w http.ResponseWriter, r *http.Request) {
-	user, err := a.social.GetUser(mux.Vars(r)["id"])
+	user, err := a.store.Social.GetUser(a.ctx, a.social, mux.Vars(r)["id"])
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1252,7 +1438,7 @@ func (a *App) updateUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := a.social.UpdateUser(targetID, req)
+	user, err := a.store.Social.UpdateUser(a.ctx, a.social, targetID, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1270,10 +1456,20 @@ func (a *App) feedHandler(w http.ResponseWriter, r *http.Request) {
 		if currentUser != nil {
 			currentUserID = currentUser.ID
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.FeedMine(limit, currentUserID)})
+		posts, err := a.store.Social.FeedMine(a.ctx, a.social, limit, currentUserID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": posts})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.Feed(limit)})
+	posts, err := a.store.Social.Feed(a.ctx, a.social, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": posts})
 }
 
 func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
@@ -1288,7 +1484,7 @@ func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AuthorID = authUser.ID
-	post, err := a.social.CreatePost(req)
+	post, err := a.store.Social.CreatePost(a.ctx, a.social, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1301,8 +1497,17 @@ func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
 			if a.chainID != nil {
 				chainPart = a.chainID.String()
 			}
-			uri := fmt.Sprintf("evm://%s/%s", chainPart, txHash)
-			updated, setErr := a.social.SetPostAttestation(post.ID, uri)
+			explorerBase := strings.TrimSpace(os.Getenv("POST_ATTEST_EXPLORER_BASE_URL"))
+			explorerURL := ""
+			if explorerBase != "" {
+				explorerURL = strings.TrimRight(explorerBase, "/") + "/tx/" + txHash
+			}
+			updated, setErr := a.social.SetPostAttestation(post.ID, PostAttestationResult{
+				ChainID:         chainPart,
+				TxHash:          txHash,
+				ContractAddress: strings.TrimSpace(os.Getenv("POST_ATTEST_CONTRACT")),
+				ExplorerURL:     explorerURL,
+			})
 			if setErr == nil {
 				post = updated
 			}
@@ -1328,7 +1533,7 @@ func (a *App) votePollHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	post, err := a.social.VotePoll(postID, authUser.ID, req.OptionIndices)
+	post, err := a.store.Social.VotePoll(a.ctx, a.social, postID, authUser.ID, req.OptionIndices)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1337,7 +1542,7 @@ func (a *App) votePollHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) getPostHandler(w http.ResponseWriter, r *http.Request) {
-	post, err := a.social.GetPost(mux.Vars(r)["id"])
+	post, err := a.store.Social.GetPost(a.ctx, a.social, mux.Vars(r)["id"])
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1347,7 +1552,7 @@ func (a *App) getPostHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) getPostThreadHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 20)
-	thread, err := a.social.GetPostThread(mux.Vars(r)["id"], limit)
+	thread, err := a.store.Social.GetPostThread(a.ctx, a.social, mux.Vars(r)["id"], limit)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1357,7 +1562,7 @@ func (a *App) getPostThreadHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) listPostRepliesHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 20)
-	replies, err := a.social.ListReplies(mux.Vars(r)["id"], limit)
+	replies, err := a.store.Social.ListReplies(a.ctx, a.social, mux.Vars(r)["id"], limit)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1367,7 +1572,12 @@ func (a *App) listPostRepliesHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) listMediaHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 20)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.ListMedia(limit)})
+	media, err := a.store.Social.ListMedia(a.ctx, a.social, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": media})
 }
 
 func (a *App) createMediaHandler(w http.ResponseWriter, r *http.Request) {
@@ -1382,7 +1592,7 @@ func (a *App) createMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.OwnerID = authUser.ID
-	asset, err := a.social.CreateMedia(req)
+	asset, err := a.store.Social.CreateMedia(a.ctx, a.social, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1392,16 +1602,31 @@ func (a *App) createMediaHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) listConversationsHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 20)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": a.social.ListConversations(limit)})
+	currentUser, _ := a.optionalAuthenticatedUser(r)
+	currentUserID := ""
+	if currentUser != nil {
+		currentUserID = currentUser.ID
+	}
+	conversations, err := a.store.Social.ListConversations(a.ctx, a.social, limit, currentUserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": conversations})
 }
 
 func (a *App) createConversationHandler(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := a.requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
 	var req CreateConversationRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
 		return
 	}
-	conversation, err := a.social.CreateConversation(req)
+	conversation, err := a.store.Social.CreateConversation(a.ctx, a.social, authUser.ID, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1409,8 +1634,36 @@ func (a *App) createConversationHandler(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "data": conversation})
 }
 
+func (a *App) followUserHandler(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := a.requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
+	targetID := mux.Vars(r)["id"]
+	if err := a.store.Social.FollowUser(a.ctx, a.social, authUser.ID, targetID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) unfollowUserHandler(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := a.requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
+	targetID := mux.Vars(r)["id"]
+	if err := a.store.Social.UnfollowUser(a.ctx, authUser.ID, targetID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (a *App) getConversationHandler(w http.ResponseWriter, r *http.Request) {
-	conversation, err := a.social.GetConversation(mux.Vars(r)["id"])
+	conversation, err := a.store.Social.GetConversation(a.ctx, a.social, mux.Vars(r)["id"])
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1430,7 +1683,7 @@ func (a *App) addMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.SenderID = authUser.ID
-	conversation, err := a.social.AddMessage(mux.Vars(r)["id"], req)
+	conversation, err := a.store.Social.AddMessage(a.ctx, a.social, mux.Vars(r)["id"], req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return

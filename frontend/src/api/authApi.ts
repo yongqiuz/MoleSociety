@@ -1,5 +1,6 @@
-import { BrowserProvider } from 'ethers';
+﻿import { BrowserProvider } from 'ethers';
 import type { UserField } from './socialApi';
+import { ApiError, type ApiEnvelope } from './apiError';
 
 export type AuthSession = {
   id: string;
@@ -14,11 +15,7 @@ export type AuthSession = {
   isBot: boolean;
 };
 
-type ApiEnvelope<T> = {
-  ok: boolean;
-  data: T;
-  error?: string;
-};
+export { ApiError };
 
 type ChallengeResponse = {
   nonce: string;
@@ -28,23 +25,12 @@ type ChallengeResponse = {
   expiresAt: string;
 };
 
-export class ApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-  }
-}
-
-const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
 const defaultApiUrl = `http://${fallbackHost}:8080`;
 const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || defaultApiUrl).replace(/\/$/, '');
+console.log('[API] auth base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const method = init?.method || 'GET';
-  console.log(`[Auth] ${method} ${path}`);
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     headers: {
@@ -54,14 +40,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  const payload = (await response.json()) as ApiEnvelope<T> | { ok: boolean; error?: string };
+  const payload = (await response.json()) as ApiEnvelope<T>;
   if (!response.ok || !payload.ok) {
-    console.warn(`[Auth] ${method} ${path} → ${response.status}`, payload.error);
-    throw new ApiError(payload.error || `Request failed: ${response.status}`, response.status);
+    console.error('[AUTH ERROR]', {
+      status: response.status,
+      error: payload.error,
+      code: payload.code,
+      type: payload.type,
+      raw: payload,
+    });
+    throw new ApiError(
+      payload.error || `Request failed: ${response.status}`,
+      response.status,
+      payload.code,
+      payload.type,
+    );
   }
 
-  console.log(`[Auth] ${method} ${path} → ${response.status} OK`);
-  return (payload as ApiEnvelope<T>).data;
+  return payload.data;
+}
+
+function createNoWalletError() {
+  return new ApiError('No injected wallet found. Please install MetaMask or another EVM wallet.', 400, 'AUTH_WALLET_APP_MISSING', 'wallet');
+}
+
+async function connectWallet() {
+  if (typeof window === 'undefined' || !window.ethereum) {
+    throw createNoWalletError();
+  }
+
+  const provider = new BrowserProvider(window.ethereum);
+  await provider.send('eth_requestAccounts', []);
+  const signer = await provider.getSigner();
+  const address = await signer.getAddress();
+  const network = await provider.getNetwork();
+
+  return {
+    signer,
+    address,
+    chainId: Number(network.chainId),
+  };
 }
 
 export async function fetchCurrentSession() {
@@ -76,22 +94,11 @@ export async function logoutSession() {
 }
 
 export async function connectWalletAndLogin() {
-  if (typeof window === 'undefined' || !window.ethereum) {
-    throw new Error('No injected wallet found. Please install MetaMask or another EVM wallet.');
-  }
-
-  const provider = new BrowserProvider(window.ethereum);
-  await provider.send('eth_requestAccounts', []);
-  const signer = await provider.getSigner();
-  const address = await signer.getAddress();
-  const network = await provider.getNetwork();
+  const { signer, address, chainId } = await connectWallet();
 
   const challenge = await request<ChallengeResponse>('/api/v1/auth/challenge', {
     method: 'POST',
-    body: JSON.stringify({
-      address,
-      chainId: Number(network.chainId),
-    }),
+    body: JSON.stringify({ address, chainId }),
   });
 
   const signature = await signer.signMessage(challenge.message);
@@ -106,6 +113,7 @@ export async function connectWalletAndLogin() {
 }
 
 export async function passwordLogin(identifier: string, password: string) {
+  console.log('[AUTH API] passwordLogin called');
   return request<AuthSession>('/api/v1/auth/password-login', {
     method: 'POST',
     body: JSON.stringify({ identifier, password }),
@@ -116,6 +124,7 @@ export async function registerAccount(payload: {
   username: string;
   email?: string;
   password: string;
+  autoWallet?: boolean;
   walletAddress?: string;
   chainId?: number;
   signature?: string;
@@ -132,4 +141,17 @@ export async function fetchBindChallenge(walletAddress: string, chainId: number)
     method: 'POST',
     body: JSON.stringify({ walletAddress, chainId }),
   });
+}
+
+export async function connectWalletForRegistration() {
+  const { signer, address, chainId } = await connectWallet();
+  const challenge = await fetchBindChallenge(address, chainId);
+  const signature = await signer.signMessage(challenge.message);
+
+  return {
+    walletAddress: address,
+    chainId,
+    nonce: challenge.nonce,
+    signature,
+  };
 }

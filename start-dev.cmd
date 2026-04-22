@@ -17,11 +17,4 @@ for %%P in (4173 8080) do (
   )
 )
 
-npx concurrently ^
-  --names "backend,frontend" ^
-  --prefix "[{name}]" ^
-  --prefix-colors "magenta,cyan" ^
-  --kill-others ^
-  --kill-others-on-fail ^
-  "npm run dev:backend" ^
-  "npm run dev:frontend"
+npm --prefix frontend run dev:all

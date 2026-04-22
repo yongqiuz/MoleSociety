@@ -37,6 +37,8 @@ type Relayer struct {
 type App struct {
 	ctx            context.Context
 	rdb            *redis.Client
+	db             *Database
+	store          *Store
 	client         *ethclient.Client
 	relayers       []*Relayer
 	relayerCounter uint64
@@ -76,10 +78,24 @@ func main() {
 	ctx := context.Background()
 	app := &App{ctx: ctx}
 	app.rdb = initRedis(ctx)
+	app.db = initDatabase(ctx)
+	defer func() {
+		if err := app.db.Close(); err != nil {
+			log.Printf("database close error: %v", err)
+		}
+	}()
+	if err := app.db.ApplyMigrations(ctx); err != nil {
+		log.Printf("database migrations failed: %v", err)
+	}
 	app.client, app.chainID = initRPC()
 	app.loadRelayers()
 	app.social = NewSocialService(ctx, app.rdb)
 	app.auth = NewAuthService(ctx, app.rdb, app.social)
+	app.store = NewStore(app.db, app.social, app.auth)
+	app.auth.SetStore(app.store.Users)
+	app.auth.SetUserLookup(func(id string) (*SocialUser, error) {
+		return app.store.Social.GetUser(app.ctx, app.social, id)
+	})
 
 	router := mux.NewRouter()
 	app.registerLegacyRoutes(router)
@@ -213,6 +229,8 @@ func (a *App) registerSocialRoutes(r *mux.Router) {
 	r.HandleFunc("/api/v1/social/users", a.createUserHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/users/{id}", a.getUserHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/users/{id}", a.updateUserHandler).Methods(http.MethodPatch, http.MethodOptions)
+	r.HandleFunc("/api/v1/social/users/{id}/follow", a.followUserHandler).Methods(http.MethodPost, http.MethodOptions)
+	r.HandleFunc("/api/v1/social/users/{id}/follow", a.unfollowUserHandler).Methods(http.MethodDelete, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/feed", a.feedHandler).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts", a.createPostHandler).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/api/v1/social/posts/{id}/poll/vote", a.votePollHandler).Methods(http.MethodPost, http.MethodOptions)
@@ -229,11 +247,16 @@ func (a *App) registerSocialRoutes(r *mux.Router) {
 
 func (a *App) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"service":     "molesociety-social-backend",
-		"redis":       a.rdb != nil,
-		"relayReady":  a.client != nil && len(a.relayers) > 0,
-		"socialStats": a.social.Stats(),
+		"ok":           true,
+		"service":      "molesociety-social-backend",
+		"redis":        a.rdb != nil,
+		"database":     a.databaseHealth(),
+		"databaseMode": mustFormatDatabaseMode(a.db),
+		"migrations":   a.migrationsStatus(),
+		"relayReady":   a.client != nil && len(a.relayers) > 0,
+		"socialSeed":   shouldSeedSocialDefaults(),
+		"appEnv":       currentAppEnvironment(),
+		"socialStats":  a.social.Stats(),
 	})
 }
 
@@ -533,7 +556,7 @@ func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Wallet")
 }
 
@@ -557,6 +580,8 @@ func isAllowedOrigin(origin string) bool {
 		"https://[::1]",
 		"http://192.168.",
 		"https://192.168.",
+		"http://172.",
+		"https://172.",
 		"http://10.",
 		"https://10.",
 	}
@@ -595,4 +620,23 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func currentAppEnvironment() string {
+	for _, key := range []string{"APP_ENV", "GO_ENV", "ENV", "NODE_ENV"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return strings.ToLower(value)
+		}
+	}
+	return "development"
+}
+
+func isProductionEnvironment() bool {
+	switch currentAppEnvironment() {
+	case "prod", "production":
+		return true
+	default:
+		return false
+	}
 }

@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendDir = Join-Path $repoRoot 'backend'
+$frontendDir = Join-Path $repoRoot 'frontend'
 $logDir = Join-Path $repoRoot '.dev-logs'
 $pidFile = Join-Path $logDir 'launcher.pid'
 $frontendPort = 4173
@@ -221,7 +222,7 @@ try {
   $frontendProcess = Start-ManagedProcess `
     -JobHandle $jobHandle `
     -Name 'frontend' `
-    -WorkingDirectory $repoRoot `
+    -WorkingDirectory $frontendDir `
     -Command 'npm run dev -- --host 0.0.0.0 --port 4173' `
     -StdOutPath (Join-Path $logDir 'frontend.out.log') `
     -StdErrPath (Join-Path $logDir 'frontend.err.log')
