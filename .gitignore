@@ -4,6 +4,8 @@ vendor/
 
 # Build outputs
 dist/
+cache/
+out/
 *.local
 /main
 *.exe
@@ -21,6 +23,8 @@ deploy.log
 .idea/
 .DS_Store
 *.swp
+*.tmp
+*.tsbuildinfo
 
 # Environment variables
 .env
