@@ -55,13 +55,13 @@ vim .env.prod
 
 ```env
 POSTGRES_PASSWORD=replace-with-a-strong-password
-PUBLIC_BASE_URL=http://81.70.208.113
+PUBLIC_BASE_URL=https://molesociety.longyinstudio.cn
 ```
 
 如果域名和 HTTPS 已就绪：
 
 ```env
-PUBLIC_BASE_URL=https://molesociety.club
+PUBLIC_BASE_URL=https://molesociety.longyinstudio.cn
 ```
 
 ## 4. 启动
@@ -100,7 +100,7 @@ curl -I http://127.0.0.1/
 如果部署正常，浏览器访问：
 
 - `http://81.70.208.113`
-- 或 `https://molesociety.club`
+- 或 `https://molesociety.longyinstudio.cn`
 
 ## 6. 更新发布
 
@@ -131,7 +131,7 @@ docker volume ls
 
 - `80 -> 443` 跳转
 - Let's Encrypt 证书
-- `molesociety.club` 指向该服务器公网 IP
+- `molesociety.longyinstudio.cn` 指向该服务器公网 IP
 
 ## 9. 关闭
 
