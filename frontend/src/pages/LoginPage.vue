@@ -2,12 +2,12 @@
 import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuth } from '../composables/useAuth';
-import { ApiError, registerAccount } from '../api/authApi';
+import { ApiError } from '../api/authApi';
 import { Mail, Lock, Eye, EyeOff, Wallet, ArrowRight, Hexagon, Sparkles, User, UserPlus } from 'lucide-vue-next';
 
 const router = useRouter();
 const route = useRoute();
-const { login, loginWithPassword } = useAuth();
+const { login, loginWithPassword, registerWithPassword } = useAuth();
 
 const activeTab = ref<'signin' | 'register' | 'wallet'>('signin');
 const loading = ref(false);
@@ -130,13 +130,12 @@ async function handleRegister() {
   loading.value = true;
   errorMessage.value = '';
   try {
-    await registerAccount({
+    await registerWithPassword({
       username,
       email: email || undefined,
       password,
       autoWallet: true,
     });
-    // 后端已自动写 Cookie，直接跳转
     redirectAfterAuth();
   } catch (error) {
     const anyErr = error as any;

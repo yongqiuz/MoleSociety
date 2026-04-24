@@ -1,13 +1,33 @@
+const ganache = require("ganache");
+
+let providerInstance;
+
+const sharedProvider = () => {
+  if (providerInstance) {
+    return providerInstance;
+  }
+
+  providerInstance = ganache.provider({
+    logging: { quiet: true },
+    wallet: { totalAccounts: 10 },
+    chain: { chainId: 1337 },
+  });
+  return providerInstance;
+};
+
 module.exports = {
   contracts_directory: "./src",
   test_directory: "./truffle-tests",
   contracts_build_directory: "./build/truffle-contracts",
   networks: {
     development: {
-      host: "127.0.0.1",
-      port: 9545,
+      provider: sharedProvider,
       network_id: "*"
-    }
+    },
+    test: {
+      provider: sharedProvider,
+      network_id: "*"
+    },
   },
   compilers: {
     solc: {

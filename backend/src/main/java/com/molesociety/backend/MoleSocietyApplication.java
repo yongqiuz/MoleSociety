@@ -203,7 +203,9 @@ class AuthController {
       SocialUser user = auth.userFromRequest(request).orElseThrow(() -> ApiException.unauthorized("AUTH_SESSION_REQUIRED", "session", "authentication required"));
       return ApiResponse.ok(AuthSessionResponse.from(user));
     } catch (ApiException err) {
-      clearSessionCookie(response);
+      if ("AUTH_SESSION_INVALID".equals(err.code)) {
+        clearSessionCookie(response);
+      }
       return err.toResponse();
     }
   }

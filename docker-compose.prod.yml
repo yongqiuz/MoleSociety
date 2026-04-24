@@ -40,7 +40,7 @@ services:
       REDIS_ADDR: redis:6379
       DB_MIGRATIONS_DIR: ./migrations
       SOCIAL_SEED: "0"
-      COOKIE_SECURE: "true"
+      COOKIE_SECURE: "false"
       COOKIE_SAMESITE: "Lax"
     expose:
       - "8080"

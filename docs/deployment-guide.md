@@ -51,17 +51,23 @@ vim .env.prod
 - `POSTGRES_PASSWORD`
 - `PUBLIC_BASE_URL`
 
+如果你当前还没有给站点配 HTTPS，务必额外设置：
+
+- `COOKIE_SECURE=false`
+
 示例：
 
 ```env
 POSTGRES_PASSWORD=replace-with-a-strong-password
 PUBLIC_BASE_URL=https://molesociety.longyinstudio.cn
+COOKIE_SECURE=false
 ```
 
 如果域名和 HTTPS 已就绪：
 
 ```env
 PUBLIC_BASE_URL=https://molesociety.longyinstudio.cn
+COOKIE_SECURE=true
 ```
 
 ## 4. 启动

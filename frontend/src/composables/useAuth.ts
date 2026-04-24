@@ -1,5 +1,13 @@
 ﻿import { computed, ref } from 'vue';
-import { ApiError, connectWalletAndLogin, fetchCurrentSession, logoutSession, passwordLogin as apiPasswordLogin, type AuthSession } from '../api/authApi';
+import {
+  ApiError,
+  connectWalletAndLogin,
+  fetchCurrentSession,
+  logoutSession,
+  passwordLogin as apiPasswordLogin,
+  registerAccount as apiRegisterAccount,
+  type AuthSession,
+} from '../api/authApi';
 
 const session = ref<AuthSession | null>(null);
 const loading = ref(false);
@@ -53,6 +61,22 @@ async function loginWithPassword(identifier: string, password: string) {
   return nextSession;
 }
 
+async function registerWithPassword(payload: {
+  username: string;
+  email?: string;
+  password: string;
+  autoWallet?: boolean;
+  walletAddress?: string;
+  chainId?: number;
+  signature?: string;
+  nonce?: string;
+}) {
+  const nextSession = await apiRegisterAccount(payload);
+  session.value = nextSession;
+  ready.value = true;
+  return nextSession;
+}
+
 async function logout() {
   try {
     await logoutSession();
@@ -80,6 +104,7 @@ export function useAuth() {
     isReady: computed(() => ready.value),
     login,
     loginWithPassword,
+    registerWithPassword,
     logout,
     loadSession,
   };
