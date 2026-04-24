@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: molesociety-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: molesociety
+      POSTGRES_USER: molesociety
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U molesociety -d molesociety"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: molesociety-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build:
+      context: ./backend
+    container_name: molesociety-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      APP_ENV: production
+      SERVER_PORT: 8080
+      DATABASE_URL: postgres://molesociety:${POSTGRES_PASSWORD}@postgres:5432/molesociety?sslmode=disable
+      REDIS_ADDR: redis:6379
+      DB_MIGRATIONS_DIR: ./migrations
+      SOCIAL_SEED: "0"
+      COOKIE_SECURE: "true"
+      COOKIE_SAMESITE: "Lax"
+    expose:
+      - "8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_SOCIAL_API_URL: ${PUBLIC_BASE_URL}
+    container_name: molesociety-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+  redis_data:

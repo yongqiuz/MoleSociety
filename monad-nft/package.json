@@ -1,0 +1,14 @@
+{
+  "name": "monad-nft-truffle",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Truffle test harness for monad-nft contracts",
+  "scripts": {
+    "truffle:test": "truffle test",
+    "truffle:compile": "truffle compile"
+  },
+  "devDependencies": {
+    "ganache": "^7.9.2",
+    "truffle": "^5.11.5"
+  }
+}

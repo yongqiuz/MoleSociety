@@ -96,6 +96,11 @@ export type SocialMessage = {
   senderId: string;
   senderHandle: string;
   body: string;
+  assetUri?: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
   createdAt: string;
 };
 
@@ -104,6 +109,13 @@ export type SocialConversation = {
   title: string;
   participantIds: string[];
   encrypted: boolean;
+  assetUri?: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
+  crossInstance?: boolean;
+  federationRoute?: string;
   messages: SocialMessage[];
   updatedAt: string;
 };
@@ -146,6 +158,7 @@ type CreateMediaRequest = {
 
 type CreatePostRequest = {
   authorId: string;
+  instance?: string;
   kind?: string;
   content: string;
   visibility: string;
@@ -176,6 +189,7 @@ type CreateConversationRequest = {
 export type UpdateUserRequest = {
   displayName?: string;
   bio?: string;
+  instance?: string;
   avatarUrl?: string;
   fields?: UserField[];
   featuredTags?: string[];

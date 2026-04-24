@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -20,6 +21,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -137,7 +139,7 @@ class HealthController {
         "migrations", persistence.migrationsStatus(),
         "redis", persistence.redisAvailable(),
         "relayReady", false,
-        "socialSeed", true,
+        "socialSeed", Env.truthy(Env.get("SOCIAL_SEED", persistence.databaseAvailable() ? "0" : "1")),
         "appEnv", Env.current(),
         "socialStats", social.stats());
   }
@@ -514,10 +516,14 @@ class PersistenceService {
   private JedisPooled redis;
 
   PersistenceService() {
-    this.databaseUrl = Strings.value(System.getProperty("DATABASE_URL")).trim();
-    this.migrationsDir = Strings.or(System.getProperty("DB_MIGRATIONS_DIR"), "./migrations");
+    this.databaseUrl = Strings.value(Env.get("DATABASE_URL", "")).trim();
+    this.migrationsDir = Strings.or(Env.get("DB_MIGRATIONS_DIR", ""), "./migrations");
     initDatabase();
     initRedis();
+  }
+
+  boolean databaseAvailable() {
+    return databaseAvailable;
   }
 
   boolean redisAvailable() {
@@ -583,13 +589,51 @@ class PersistenceService {
       for (FederationInstance item : state.instances) saveInstance(item);
       for (SocialUser user : state.users) saveUser(user);
       for (MediaAsset asset : state.media) saveMedia(asset);
-      for (SocialPost post : state.posts) savePost(post);
+      for (SocialPost post : postsForPersistence(state.posts)) savePost(post);
       for (Conversation conversation : state.conversations) saveConversation(conversation);
       for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
         for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
       }
     }
     saveSocialSnapshot(state);
+  }
+
+  void saveLoadedSocialState(SocialState state) {
+    if (databaseAvailable) {
+      exec(conn -> {
+        try (Statement st = conn.createStatement()) {
+          st.executeUpdate("DELETE FROM federation_instances");
+        }
+      });
+      for (FederationInstance item : state.instances) saveInstance(item);
+      for (SocialUser user : state.users) saveUser(user);
+      for (MediaAsset asset : state.media) saveMedia(asset);
+      for (SocialPost post : postsForPersistence(state.posts)) savePost(post);
+      for (Conversation conversation : state.conversations) saveConversation(conversation);
+      for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
+        for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
+      }
+    }
+    saveSocialSnapshot(state);
+  }
+
+  private List<SocialPost> postsForPersistence(List<SocialPost> posts) {
+    Set<String> postIDs = new HashSet<>();
+    for (SocialPost post : posts) postIDs.add(post.id);
+    for (SocialPost post : posts) {
+      if (Strings.hasText(post.parentPostId) && !postIDs.contains(post.parentPostId)) {
+        post.parentPostId = "";
+        post.replyDepth = 0;
+      }
+      if (Strings.hasText(post.rootPostId) && !postIDs.contains(post.rootPostId)) {
+        post.rootPostId = "";
+      }
+    }
+    return posts.stream()
+        .sorted(Comparator
+            .comparingInt((SocialPost post) -> Strings.hasText(post.parentPostId) ? 1 : 0)
+            .thenComparing(post -> Strings.value(post.createdAt)))
+        .toList();
   }
 
   void saveSocialSnapshot(SocialState state) {
@@ -800,39 +844,40 @@ class PersistenceService {
     if (!databaseAvailable) return;
     exec(conn -> {
       try (PreparedStatement ps = conn.prepareStatement("""
-          INSERT INTO social_posts(id, author_id, kind, content, visibility, storage_uri, attestation_uri,
+          INSERT INTO social_posts(id, author_id, instance, kind, content, visibility, storage_uri, attestation_uri,
             chain_id, tx_hash, contract_address, explorer_url, tags_json, parent_post_id, root_post_id,
             reply_depth, replies_count, boosts_count, likes_count, type, interaction, poll_json, created_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?::jsonb,?)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?::jsonb,?)
           ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, content=EXCLUDED.content, visibility=EXCLUDED.visibility,
-            storage_uri=EXCLUDED.storage_uri, attestation_uri=EXCLUDED.attestation_uri, chain_id=EXCLUDED.chain_id,
-            tx_hash=EXCLUDED.tx_hash, contract_address=EXCLUDED.contract_address, explorer_url=EXCLUDED.explorer_url,
+            instance=EXCLUDED.instance, storage_uri=EXCLUDED.storage_uri, attestation_uri=EXCLUDED.attestation_uri,
+            chain_id=EXCLUDED.chain_id, tx_hash=EXCLUDED.tx_hash, contract_address=EXCLUDED.contract_address, explorer_url=EXCLUDED.explorer_url,
             tags_json=EXCLUDED.tags_json, parent_post_id=EXCLUDED.parent_post_id, root_post_id=EXCLUDED.root_post_id,
             reply_depth=EXCLUDED.reply_depth, replies_count=EXCLUDED.replies_count, boosts_count=EXCLUDED.boosts_count,
             likes_count=EXCLUDED.likes_count, type=EXCLUDED.type, interaction=EXCLUDED.interaction, poll_json=EXCLUDED.poll_json
           """)) {
         ps.setString(1, post.id);
         ps.setString(2, post.authorId);
-        ps.setString(3, post.kind);
-        ps.setString(4, Strings.value(post.content));
-        ps.setString(5, Strings.or(post.visibility, "public"));
-        ps.setString(6, Strings.value(post.storageUri));
-        ps.setString(7, Strings.value(post.attestationUri));
-        ps.setString(8, Strings.value(post.chainId));
-        ps.setString(9, Strings.value(post.txHash));
-        ps.setString(10, Strings.value(post.contractAddress));
-        ps.setString(11, Strings.value(post.explorerUrl));
-        ps.setString(12, json(post.tags));
-        setNullable(ps, 13, post.parentPostId);
-        setNullable(ps, 14, post.rootPostId);
-        ps.setInt(15, post.replyDepth);
-        ps.setInt(16, post.replies);
-        ps.setInt(17, post.boosts);
-        ps.setInt(18, post.likes);
-        ps.setString(19, Strings.or(post.type, "post"));
-        ps.setString(20, Strings.or(post.interaction, "anyone"));
-        ps.setString(21, post.poll == null ? "null" : json(post.poll));
-        ps.setTimestamp(22, timestamp(post.createdAt));
+        ps.setString(3, Strings.value(post.instance));
+        ps.setString(4, post.kind);
+        ps.setString(5, Strings.value(post.content));
+        ps.setString(6, Strings.or(post.visibility, "public"));
+        ps.setString(7, Strings.value(post.storageUri));
+        ps.setString(8, Strings.value(post.attestationUri));
+        ps.setString(9, Strings.value(post.chainId));
+        ps.setString(10, Strings.value(post.txHash));
+        ps.setString(11, Strings.value(post.contractAddress));
+        ps.setString(12, Strings.value(post.explorerUrl));
+        ps.setString(13, json(post.tags));
+        setNullable(ps, 14, post.parentPostId);
+        setNullable(ps, 15, post.rootPostId);
+        ps.setInt(16, post.replyDepth);
+        ps.setInt(17, post.replies);
+        ps.setInt(18, post.boosts);
+        ps.setInt(19, post.likes);
+        ps.setString(20, Strings.or(post.type, "post"));
+        ps.setString(21, Strings.or(post.interaction, "anyone"));
+        ps.setString(22, post.poll == null ? "null" : json(post.poll));
+        ps.setTimestamp(23, timestamp(post.createdAt));
         ps.executeUpdate();
       }
       try (PreparedStatement delete = conn.prepareStatement("DELETE FROM post_media_links WHERE post_id = ?")) {
@@ -877,16 +922,24 @@ class PersistenceService {
     if (!databaseAvailable) return;
     exec(conn -> {
       try (PreparedStatement ps = conn.prepareStatement("""
-          INSERT INTO conversations(id, title, initiator_id, encrypted, updated_at)
-          VALUES (?,?,?,?,?)
+          INSERT INTO conversations(id, title, initiator_id, encrypted, asset_uri, chain_id,
+            tx_hash, contract_address, explorer_url, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, initiator_id=EXCLUDED.initiator_id,
-            encrypted=EXCLUDED.encrypted, updated_at=EXCLUDED.updated_at
+            encrypted=EXCLUDED.encrypted, asset_uri=EXCLUDED.asset_uri, chain_id=EXCLUDED.chain_id,
+            tx_hash=EXCLUDED.tx_hash, contract_address=EXCLUDED.contract_address,
+            explorer_url=EXCLUDED.explorer_url, updated_at=EXCLUDED.updated_at
           """)) {
         ps.setString(1, conversation.id);
         ps.setString(2, conversation.title);
         setNullable(ps, 3, conversation.initiatorId);
         ps.setBoolean(4, conversation.encrypted);
-        ps.setTimestamp(5, timestamp(conversation.updatedAt));
+        ps.setString(5, Strings.value(conversation.assetUri));
+        ps.setString(6, Strings.value(conversation.chainId));
+        ps.setString(7, Strings.value(conversation.txHash));
+        ps.setString(8, Strings.value(conversation.contractAddress));
+        ps.setString(9, Strings.value(conversation.explorerUrl));
+        ps.setTimestamp(10, timestamp(conversation.updatedAt));
         ps.executeUpdate();
       }
       try (PreparedStatement deleteParticipants = conn.prepareStatement("DELETE FROM conversation_participants WHERE conversation_id=?")) {
@@ -906,15 +959,23 @@ class PersistenceService {
       }
       for (ChatMessage message : conversation.messages) {
         try (PreparedStatement ps = conn.prepareStatement("""
-            INSERT INTO chat_messages(id, conversation_id, sender_id, body, created_at)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT (id) DO UPDATE SET body=EXCLUDED.body
+            INSERT INTO chat_messages(id, conversation_id, sender_id, body, asset_uri, chain_id,
+              tx_hash, contract_address, explorer_url, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (id) DO UPDATE SET body=EXCLUDED.body, asset_uri=EXCLUDED.asset_uri,
+              chain_id=EXCLUDED.chain_id, tx_hash=EXCLUDED.tx_hash,
+              contract_address=EXCLUDED.contract_address, explorer_url=EXCLUDED.explorer_url
             """)) {
           ps.setString(1, message.id);
           ps.setString(2, message.conversationId);
           ps.setString(3, message.senderId);
           ps.setString(4, message.body);
-          ps.setTimestamp(5, timestamp(message.createdAt));
+          ps.setString(5, Strings.value(message.assetUri));
+          ps.setString(6, Strings.value(message.chainId));
+          ps.setString(7, Strings.value(message.txHash));
+          ps.setString(8, Strings.value(message.contractAddress));
+          ps.setString(9, Strings.value(message.explorerUrl));
+          ps.setTimestamp(10, timestamp(message.createdAt));
           ps.executeUpdate();
         }
       }
@@ -932,7 +993,7 @@ class PersistenceService {
   }
 
   private void initRedis() {
-    String addr = Strings.or(System.getProperty("REDIS_ADDR"), "127.0.0.1:6379");
+    String addr = Strings.or(Env.get("REDIS_ADDR", ""), "127.0.0.1:6379");
     try {
       String[] parts = addr.split(":", 2);
       redis = new JedisPooled(parts[0], parts.length > 1 ? Integer.parseInt(parts[1]) : 6379);
@@ -980,6 +1041,7 @@ class PersistenceService {
   private void ensureSchemaCompatibility(Connection conn) throws SQLException {
     try (Statement st = conn.createStatement()) {
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS instance TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS tx_hash TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS contract_address TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS explorer_url TEXT NOT NULL DEFAULT ''");
@@ -990,6 +1052,16 @@ class PersistenceService {
       st.executeUpdate("ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'");
       st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS initiator_id TEXT");
       st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE");
+      st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS asset_uri TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS tx_hash TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS contract_address TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS explorer_url TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS asset_uri TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS tx_hash TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS contract_address TEXT NOT NULL DEFAULT ''");
+      st.executeUpdate("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS explorer_url TEXT NOT NULL DEFAULT ''");
     }
   }
 
@@ -1030,7 +1102,7 @@ class PersistenceService {
         }
       }
       try (PreparedStatement ps = conn.prepareStatement("""
-          SELECT p.*, u.handle, u.display_name, u.instance
+          SELECT p.*, u.handle, u.display_name, COALESCE(NULLIF(p.instance, ''), u.instance) AS post_instance
           FROM social_posts p JOIN social_users u ON u.id = p.author_id
           ORDER BY p.created_at DESC
           """)) {
@@ -1041,7 +1113,7 @@ class PersistenceService {
           post.authorId = rs.getString("author_id");
           post.authorHandle = rs.getString("handle");
           post.authorName = rs.getString("display_name");
-          post.instance = rs.getString("instance");
+          post.instance = rs.getString("post_instance");
           post.kind = rs.getString("kind");
           post.content = rs.getString("content");
           post.visibility = rs.getString("visibility");
@@ -1071,7 +1143,7 @@ class PersistenceService {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) state.follows.computeIfAbsent(rs.getString(1), key -> new HashSet<>()).add(rs.getString(2));
       }
-      try (PreparedStatement ps = conn.prepareStatement("SELECT id, title, initiator_id, encrypted, updated_at FROM conversations ORDER BY updated_at DESC")) {
+      try (PreparedStatement ps = conn.prepareStatement("SELECT id, title, initiator_id, encrypted, asset_uri, chain_id, tx_hash, contract_address, explorer_url, updated_at FROM conversations ORDER BY updated_at DESC")) {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) {
           Conversation item = new Conversation();
@@ -1079,6 +1151,11 @@ class PersistenceService {
           item.title = rs.getString("title");
           item.initiatorId = Strings.value(rs.getString("initiator_id"));
           item.encrypted = rs.getBoolean("encrypted");
+          item.assetUri = rs.getString("asset_uri");
+          item.chainId = rs.getString("chain_id");
+          item.txHash = rs.getString("tx_hash");
+          item.contractAddress = rs.getString("contract_address");
+          item.explorerUrl = rs.getString("explorer_url");
           item.updatedAt = instantString(rs.getTimestamp("updated_at"));
           item.participantIds = loadParticipants(conn, item.id);
           item.messages = loadMessages(conn, item.id);
@@ -1115,13 +1192,22 @@ class PersistenceService {
   private List<ChatMessage> loadMessages(Connection conn, String conversationID) throws SQLException {
     List<ChatMessage> result = new ArrayList<>();
     try (PreparedStatement ps = conn.prepareStatement("""
-        SELECT m.id, m.conversation_id, m.sender_id, u.handle, m.body, m.created_at
+        SELECT m.id, m.conversation_id, m.sender_id, u.handle, m.body, m.asset_uri, m.chain_id,
+          m.tx_hash, m.contract_address, m.explorer_url, m.created_at
         FROM chat_messages m JOIN social_users u ON u.id = m.sender_id
         WHERE m.conversation_id=? ORDER BY m.created_at ASC
         """)) {
       ps.setString(1, conversationID);
       ResultSet rs = ps.executeQuery();
-      while (rs.next()) result.add(new ChatMessage(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5), instantString(rs.getTimestamp(6))));
+      while (rs.next()) {
+        ChatMessage message = new ChatMessage(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5), instantString(rs.getTimestamp(11)));
+        message.assetUri = rs.getString(6);
+        message.chainId = rs.getString(7);
+        message.txHash = rs.getString(8);
+        message.contractAddress = rs.getString(9);
+        message.explorerUrl = rs.getString(10);
+        result.add(message);
+      }
     }
     return result;
   }
@@ -1247,6 +1333,61 @@ class SocialState {
 }
 
 @Service
+class ActiveSessionRegistry {
+  private final Map<String, AuthSessionRecord> sessions = new ConcurrentHashMap<>();
+
+  void touch(AuthSessionRecord session) {
+    if (session != null && Strings.hasText(session.id) && !expired(session.expiresAt)) {
+      sessions.put(session.id, session);
+    }
+  }
+
+  void remove(String sessionID) {
+    if (Strings.hasText(sessionID)) {
+      sessions.remove(sessionID);
+    }
+  }
+
+  Map<String, Integer> countOnlineByInstance(List<SocialUser> users) {
+    Instant now = Instant.now();
+    Map<String, SocialUser> usersByID = new HashMap<>();
+    for (SocialUser user : users) {
+      usersByID.put(user.id, user);
+    }
+
+    Set<String> countedUsers = new HashSet<>();
+    Map<String, Integer> result = new HashMap<>();
+    for (AuthSessionRecord session : sessions.values()) {
+      if (!Strings.hasText(session.expiresAt)) continue;
+      Instant expiresAt;
+      try {
+        expiresAt = Instant.parse(session.expiresAt);
+      } catch (DateTimeParseException err) {
+        continue;
+      }
+      if (!expiresAt.isAfter(now)) {
+        sessions.remove(session.id);
+        continue;
+      }
+      if (!countedUsers.add(session.userId)) continue;
+      SocialUser user = usersByID.get(session.userId);
+      if (user != null) {
+        result.merge(user.instance, 1, Integer::sum);
+      }
+    }
+    return result;
+  }
+
+  private static boolean expired(String timestamp) {
+    try {
+      return Instant.now().isAfter(Instant.parse(timestamp));
+    } catch (DateTimeParseException err) {
+      return true;
+    }
+  }
+}
+
+@Service
 class AuthService {
   static final String SESSION_COOKIE = "molesociety_session";
   private static final Duration CHALLENGE_TTL = Duration.ofMinutes(5);
@@ -1254,16 +1395,19 @@ class AuthService {
 
   private final SocialService social;
   private final PersistenceService persistence;
+  private final ActiveSessionRegistry activeSessions;
   private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
   private final SecureRandom random = new SecureRandom();
   private final Map<String, AuthChallenge> challenges = new ConcurrentHashMap<>();
   private final Map<String, AuthSessionRecord> sessions = new ConcurrentHashMap<>();
   private final Map<String, Account> accounts = new ConcurrentHashMap<>();
 
-  AuthService(SocialService social, PersistenceService persistence) {
+  AuthService(SocialService social, PersistenceService persistence, ActiveSessionRegistry activeSessions) {
     this.social = social;
     this.persistence = persistence;
+    this.activeSessions = activeSessions;
     accounts.putAll(persistence.loadAuthAccounts());
+    ensureAccountsForUsers();
   }
 
   AuthChallenge createChallenge(String address, long chainID, String uri) {
@@ -1358,7 +1502,7 @@ class AuthService {
       persistence.deleteChallenge(req.nonce);
     }
 
-    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", "vault.social", wallet, ""));
+    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", "摩尔1号", wallet, ""));
     Account account = new Account();
     account.id = "acc_" + System.nanoTime();
     account.username = username;
@@ -1382,14 +1526,65 @@ class AuthService {
     AuthSessionRecord session = persistence.loadSession(cookie.get()).orElse(sessions.get(cookie.get()));
     if (session == null || expired(session.expiresAt)) {
       sessions.remove(cookie.get());
+      activeSessions.remove(cookie.get());
       throw ApiException.unauthorized("AUTH_SESSION_INVALID", "session", "invalid session");
     }
+    activeSessions.touch(session);
     return Optional.of(social.getUser(session.userId));
   }
 
   void deleteSession(String sessionID) {
     sessions.remove(sessionID);
+    activeSessions.remove(sessionID);
     persistence.deleteSession(sessionID);
+  }
+
+  private void ensureAccountsForUsers() {
+    Set<String> accountUserIDs = new HashSet<>();
+    Set<String> usernames = new HashSet<>();
+    Set<String> emails = new HashSet<>();
+    Set<String> wallets = new HashSet<>();
+    for (Account account : accounts.values()) {
+      accountUserIDs.add(account.userId);
+      usernames.add(Strings.value(account.username).toLowerCase(Locale.ROOT));
+      emails.add(Strings.value(account.email).toLowerCase(Locale.ROOT));
+      wallets.add(Strings.value(account.wallet).toLowerCase(Locale.ROOT));
+    }
+
+    for (SocialUser user : social.listUsers()) {
+      if (accountUserIDs.contains(user.id)) continue;
+
+      Account account = new Account();
+      account.id = "acc_backfill_" + user.id.replaceAll("[^A-Za-z0-9_\\-]", "_");
+      account.username = uniqueValue(baseUsername(user), usernames);
+      account.email = uniqueValue(account.username + "@local.molesociety", emails);
+      account.passwordHash = encoder.encode(System.getProperty("BACKFILL_ACCOUNT_PASSWORD", "123456"));
+      account.wallet = uniqueValue(Strings.value(user.wallet), wallets);
+      account.userId = user.id;
+      account.status = "active";
+      account.createdAt = Instant.now().toString();
+      account.updatedAt = account.createdAt;
+      accounts.put(account.id, account);
+      accountUserIDs.add(account.userId);
+      persistence.saveAuthAccount(account);
+    }
+  }
+
+  private static String baseUsername(SocialUser user) {
+    String base = Strings.value(user.handle).replaceFirst("^@", "").trim();
+    base = base.replaceAll("[^A-Za-z0-9_\\-]", "_");
+    return Strings.hasText(base) ? base : user.id;
+  }
+
+  private static String uniqueValue(String base, Set<String> used) {
+    String value = Strings.hasText(base) ? base.trim() : "user";
+    String candidate = value;
+    int suffix = 2;
+    while (used.contains(candidate.toLowerCase(Locale.ROOT))) {
+      candidate = value + "_" + suffix++;
+    }
+    used.add(candidate.toLowerCase(Locale.ROOT));
+    return candidate;
   }
 
   private AuthChallenge challenge(String nonce) {
@@ -1412,6 +1607,7 @@ class AuthService {
     session.createdAt = Instant.now().toString();
     session.expiresAt = Instant.now().plus(SESSION_TTL).toString();
     sessions.put(session.id, session);
+    activeSessions.touch(session);
     persistence.saveSession(session, SESSION_TTL);
     return session;
   }
@@ -1474,6 +1670,7 @@ class AuthService {
 @Service
 class SocialService {
   private final PersistenceService persistence;
+  private final ActiveSessionRegistry activeSessions;
   private final List<SocialUser> users = new ArrayList<>();
   private final List<SocialPost> posts = new ArrayList<>();
   private final List<MediaAsset> media = new ArrayList<>();
@@ -1481,10 +1678,15 @@ class SocialService {
   private final List<FederationInstance> instances = new ArrayList<>();
   private final Map<String, Set<String>> follows = new HashMap<>();
 
-  SocialService(PersistenceService persistence) {
+  SocialService(PersistenceService persistence, ActiveSessionRegistry activeSessions) {
     this.persistence = persistence;
+    this.activeSessions = activeSessions;
     if (!persistence.loadSocialState(this)) {
-      reset(Env.truthy(System.getProperty("SOCIAL_SEED", "1")));
+      reset(Env.truthy(Env.get("SOCIAL_SEED", persistence.databaseAvailable() ? "0" : "1")));
+    } else {
+      normalizeMoleInstances();
+      ensureChainAssets();
+      persistence.saveLoadedSocialState(snapshot());
     }
   }
 
@@ -1498,6 +1700,7 @@ class SocialService {
     if (seed) {
       seed();
     }
+    ensureChainAssets();
     persistence.replaceSocialState(snapshot());
   }
 
@@ -1514,6 +1717,7 @@ class SocialService {
     conversations.addAll(state.conversations);
     instances.addAll(state.instances);
     follows.putAll(state.follows);
+    ensureChainAssets();
     refreshPostCounts();
     refreshFollowCounts();
   }
@@ -1548,7 +1752,7 @@ class SocialService {
   }
 
   synchronized List<FederationInstance> listInstances() {
-    return new ArrayList<>(instances);
+    return liveInstances();
   }
 
   synchronized List<SocialUser> listUsers() {
@@ -1564,7 +1768,7 @@ class SocialService {
     user.handle = normalizeHandle(req.handle);
     user.displayName = Strings.or(req.displayName, user.handle.replaceFirst("^@", ""));
     user.bio = Strings.value(req.bio);
-    user.instance = Strings.or(req.instance, "vault.social");
+    user.instance = Strings.or(req.instance, "摩尔1号");
     user.wallet = Strings.value(req.wallet);
     user.avatarUrl = Strings.value(req.avatarUrl);
     user.fields = new ArrayList<>();
@@ -1584,6 +1788,7 @@ class SocialService {
     SocialUser user = getUser(id);
     if (req.displayName != null) user.displayName = req.displayName;
     if (req.bio != null) user.bio = req.bio;
+    if (req.instance != null) user.instance = resolveUserInstance(req.instance);
     if (req.avatarUrl != null) user.avatarUrl = req.avatarUrl;
     if (req.fields != null) user.fields = req.fields;
     if (req.featuredTags != null) user.featuredTags = req.featuredTags;
@@ -1639,7 +1844,7 @@ class SocialService {
     post.authorId = author.id;
     post.authorHandle = author.handle;
     post.authorName = author.displayName;
-    post.instance = author.instance;
+    post.instance = resolvePostInstance(req.instance, author.instance);
     post.kind = Strings.or(req.kind, Strings.hasText(req.parentPostId) ? "reply" : "post");
     post.content = Strings.value(req.content).trim();
     post.visibility = Strings.or(req.visibility, "public");
@@ -1666,6 +1871,7 @@ class SocialService {
       post.poll = poll;
     }
     post.createdAt = Instant.now().toString();
+    applyPostChainAsset(post);
     posts.add(0, post);
     refreshPostCounts();
     persistence.savePost(post);
@@ -1675,6 +1881,24 @@ class SocialService {
 
   synchronized SocialPost getPost(String id) {
     return findPost(id).orElseThrow(() -> ApiException.notFound("SOCIAL_POST_NOT_FOUND", "not_found", "post not found: " + id));
+  }
+
+  private String resolvePostInstance(String requestedInstance, String fallbackInstance) {
+    String resolved = Strings.or(requestedInstance, fallbackInstance);
+    boolean exists = instances.stream().anyMatch(instance -> instance.name.equals(resolved));
+    return exists ? resolved : fallbackInstance;
+  }
+
+  private String resolveUserInstance(String requestedInstance) {
+    String resolved = Strings.value(requestedInstance).trim();
+    if (!Strings.hasText(resolved)) {
+      throw ApiException.badRequest("SOCIAL_INSTANCE_REQUIRED", "validation", "instance is required");
+    }
+    boolean exists = instances.stream().anyMatch(instance -> instance.name.equals(resolved));
+    if (!exists) {
+      throw ApiException.badRequest("SOCIAL_INSTANCE_UNKNOWN", "validation", "unknown instance: " + resolved);
+    }
+    return resolved;
   }
 
   synchronized PostThread getPostThread(String id, int limit) {
@@ -1748,7 +1972,9 @@ class SocialService {
   synchronized List<Conversation> listConversations(int limit, String currentUserID) {
     return slice(conversations.stream()
         .filter(c -> !Strings.hasText(currentUserID) || c.participantIds.contains(currentUserID))
-        .sorted(Comparator.comparing((Conversation c) -> c.updatedAt).reversed()).toList(), limit);
+        .sorted(Comparator.comparing((Conversation c) -> c.updatedAt).reversed())
+        .map(this::enrichConversation)
+        .toList(), limit);
   }
 
   synchronized Conversation createConversation(String initiatorID, CreateConversationRequest req) {
@@ -1768,14 +1994,15 @@ class SocialService {
     conversation.encrypted = req.encrypted;
     conversation.messages = new ArrayList<>();
     conversation.updatedAt = Instant.now().toString();
+    applyConversationChainAsset(conversation);
     conversations.add(0, conversation);
     persistence.saveConversation(conversation);
     persistence.saveSocialSnapshot(snapshot());
-    return conversation;
+    return enrichConversation(conversation);
   }
 
   synchronized Conversation getConversation(String id) {
-    return conversations.stream().filter(c -> c.id.equals(id)).findFirst()
+    return conversations.stream().filter(c -> c.id.equals(id)).findFirst().map(this::enrichConversation)
         .orElseThrow(() -> ApiException.notFound("SOCIAL_CONVERSATION_NOT_FOUND", "not_found", "conversation not found: " + id));
   }
 
@@ -1792,11 +2019,39 @@ class SocialService {
     message.senderHandle = sender.handle;
     message.body = Strings.value(req.body).trim();
     message.createdAt = Instant.now().toString();
+    applyMessageChainAsset(message);
     conversation.messages.add(message);
     conversation.updatedAt = message.createdAt;
     persistence.saveConversation(conversation);
     persistence.saveSocialSnapshot(snapshot());
-    return conversation;
+    return enrichConversation(conversation);
+  }
+
+  private Conversation enrichConversation(Conversation source) {
+    Conversation item = new Conversation();
+    item.id = source.id;
+    item.title = source.title;
+    item.participantIds = new ArrayList<>(source.participantIds);
+    item.initiatorId = source.initiatorId;
+    item.encrypted = source.encrypted;
+    item.assetUri = source.assetUri;
+    item.chainId = source.chainId;
+    item.txHash = source.txHash;
+    item.contractAddress = source.contractAddress;
+    item.explorerUrl = source.explorerUrl;
+    item.messages = new ArrayList<>(source.messages);
+    item.updatedAt = source.updatedAt;
+
+    List<String> route = item.participantIds.stream()
+        .map(this::findUser)
+        .flatMap(Optional::stream)
+        .map(user -> user.instance)
+        .filter(Strings::hasText)
+        .distinct()
+        .toList();
+    item.crossInstance = route.size() > 1;
+    item.federationRoute = String.join(" -> ", route);
+    return item;
   }
 
   synchronized List<Map<String, Object>> distribution() {
@@ -1809,28 +2064,140 @@ class SocialService {
     return result;
   }
 
+  private List<FederationInstance> liveInstances() {
+    Map<String, Integer> onlineByInstance = activeSessions.countOnlineByInstance(users);
+    List<FederationInstance> result = new ArrayList<>();
+    for (FederationInstance item : instances) {
+      int online = onlineByInstance.getOrDefault(item.name, 0);
+      long postCount = posts.stream().filter(post -> item.name.equals(post.instance)).count();
+      FederationInstance live = new FederationInstance(
+          item.name,
+          item.focus,
+          online + " 人在线",
+          measuredInstanceLatency(item.name),
+          online > 0 || postCount > 0 ? "healthy" : "idle"
+      );
+      result.add(live);
+    }
+    return result;
+  }
+
+  private String measuredInstanceLatency(String instanceName) {
+    String probeURL = instanceProbeURLs().get(instanceName);
+    if (!Strings.hasText(probeURL)) return "未探测";
+    try {
+      long started = System.nanoTime();
+      HttpURLConnection conn = (HttpURLConnection) URI.create(probeURL).toURL().openConnection();
+      conn.setRequestMethod("HEAD");
+      conn.setConnectTimeout(1200);
+      conn.setReadTimeout(1200);
+      conn.connect();
+      int status = conn.getResponseCode();
+      conn.disconnect();
+      long elapsedMs = Math.max(1L, (System.nanoTime() - started) / 1_000_000L);
+      return status > 0 ? elapsedMs + " ms" : "不可达";
+    } catch (Exception err) {
+      return "不可达";
+    }
+  }
+
+  private Map<String, String> instanceProbeURLs() {
+    Map<String, String> result = new HashMap<>();
+    String raw = Env.get("INSTANCE_PROBE_URLS", "");
+    for (String entry : raw.split("[,;]")) {
+      int idx = entry.indexOf('=');
+      if (idx <= 0) continue;
+      String name = entry.substring(0, idx).trim();
+      String url = entry.substring(idx + 1).trim();
+      if (Strings.hasText(name) && Strings.hasText(url)) {
+        result.put(name, url);
+      }
+    }
+    return result;
+  }
+
+  private void ensureChainAssets() {
+    posts.forEach(this::applyPostChainAsset);
+    conversations.forEach(conversation -> {
+      applyConversationChainAsset(conversation);
+      conversation.messages.forEach(this::applyMessageChainAsset);
+    });
+  }
+
+  private void applyPostChainAsset(SocialPost post) {
+    if (!Strings.hasText(post.storageUri)) post.storageUri = "asset://molesociety/post/" + post.id;
+    if (!Strings.hasText(post.attestationUri)) post.attestationUri = "attestation://molesociety/post/" + post.id;
+    if (Strings.hasText(post.txHash)) return;
+    ChainAsset asset = createChainAsset("post", post.id, post.authorId + "|" + post.content + "|" + post.storageUri);
+    post.chainId = asset.chainId;
+    post.txHash = asset.txHash;
+    post.contractAddress = asset.contractAddress;
+    post.explorerUrl = asset.explorerUrl;
+  }
+
+  private void applyConversationChainAsset(Conversation conversation) {
+    if (!Strings.hasText(conversation.assetUri)) conversation.assetUri = "asset://molesociety/conversation/" + conversation.id;
+    if (Strings.hasText(conversation.txHash)) return;
+    ChainAsset asset = createChainAsset("conversation", conversation.id, conversation.title + "|" + String.join(",", conversation.participantIds));
+    conversation.chainId = asset.chainId;
+    conversation.txHash = asset.txHash;
+    conversation.contractAddress = asset.contractAddress;
+    conversation.explorerUrl = asset.explorerUrl;
+  }
+
+  private void applyMessageChainAsset(ChatMessage message) {
+    if (!Strings.hasText(message.assetUri)) message.assetUri = "asset://molesociety/message/" + message.id;
+    if (Strings.hasText(message.txHash)) return;
+    ChainAsset asset = createChainAsset("message", message.id, message.conversationId + "|" + message.senderId + "|" + message.body);
+    message.chainId = asset.chainId;
+    message.txHash = asset.txHash;
+    message.contractAddress = asset.contractAddress;
+    message.explorerUrl = asset.explorerUrl;
+  }
+
+  private ChainAsset createChainAsset(String kind, String id, String payload) {
+    String chainID = Long.toString(Env.longValue("CHAIN_ID", 10143L));
+    String txHash = "0x" + sha256Hex(kind + "|" + id + "|" + chainID + "|" + payload);
+    String contractAddress = Strings.value(System.getProperty("ASSET_CONTRACT_ADDRESS", System.getProperty("CONTRACT_ADDRESS", "")));
+    String explorerBase = Strings.or(System.getProperty("CHAIN_EXPLORER_BASE"), Strings.or(System.getProperty("CHAIN_EXPLORER_URL"), "https://testnet.monadexplorer.com/tx/"));
+    String separator = explorerBase.endsWith("/") ? "" : "/";
+    return new ChainAsset(chainID, txHash, contractAddress, explorerBase + separator + txHash);
+  }
+
+  private String sha256Hex(String value) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] hash = digest.digest(Strings.value(value).getBytes(StandardCharsets.UTF_8));
+      StringBuilder out = new StringBuilder(hash.length * 2);
+      for (byte item : hash) out.append(String.format("%02x", item));
+      return out.toString();
+    } catch (Exception err) {
+      throw new IllegalStateException("failed to create chain asset hash", err);
+    }
+  }
+
   private void seed() {
     Instant now = Instant.now();
-    instances.add(new FederationInstance("vault.social", "创作者主权与链上身份", "12.4k", "43 ms", "healthy"));
-    instances.add(new FederationInstance("readers.polkadot", "阅读社群与数字馆藏", "8.9k", "51 ms", "healthy"));
-    instances.add(new FederationInstance("relay.zone", "跨实例消息转发", "3.1k", "37 ms", "healthy"));
-    instances.add(new FederationInstance("storage.zone", "媒体与永续资源镜像", "5.7k", "49 ms", "healthy"));
+    instances.add(new FederationInstance("摩尔1号", "创作者主权与链上身份", "12.4k", "43 ms", "healthy"));
+    instances.add(new FederationInstance("摩尔2号", "阅读社群与数字馆藏", "8.9k", "51 ms", "healthy"));
+    instances.add(new FederationInstance("摩尔3号", "跨实例消息转发", "3.1k", "37 ms", "healthy"));
+    instances.add(new FederationInstance("摩尔4号", "媒体与永续资源镜像", "5.7k", "49 ms", "healthy"));
 
-    users.add(seedUser("user_archive", "@archive", "Whale Archive", "为创作者提供永久内容归档与链上身份锚定。", "vault.social", "0xa18f...3c92", "https://picsum.photos/seed/archive/128/128", 1284, 312, now.minus(Duration.ofHours(48))));
-    users.add(seedUser("user_librarian", "@librarian", "Node Librarian", "把书籍确权、媒体存储和去中心化社交连接在一起。", "readers.polkadot", "0x78fe...12ab", "https://picsum.photos/seed/librarian/128/128", 932, 221, now.minus(Duration.ofHours(36))));
-    users.add(seedUser("user_fedilab", "@fedilab", "Open Federation Lab", "探索 ActivityPub、实时会话和多实例协作。", "relay.zone", "0x95bc...09ee", "https://picsum.photos/seed/fedilab/128/128", 1650, 415, now.minus(Duration.ofHours(24))));
+    users.add(seedUser("user_archive", "@archive", "Whale Archive", "为创作者提供永久内容归档与链上身份锚定。", "摩尔1号", "0xa18f...3c92", "https://picsum.photos/seed/archive/128/128", 1284, 312, now.minus(Duration.ofHours(48))));
+    users.add(seedUser("user_librarian", "@librarian", "Node Librarian", "把书籍确权、媒体存储和去中心化社交连接在一起。", "摩尔2号", "0x78fe...12ab", "https://picsum.photos/seed/librarian/128/128", 932, 221, now.minus(Duration.ofHours(36))));
+    users.add(seedUser("user_fedilab", "@fedilab", "Open Federation Lab", "探索 ActivityPub、实时会话和多实例协作。", "摩尔3号", "0x95bc...09ee", "https://picsum.photos/seed/fedilab/128/128", 1650, 415, now.minus(Duration.ofHours(24))));
 
     MediaAsset manifest = new MediaAsset("media_manifesto", "user_archive", "genesis-manifesto.png", "image", "https://picsum.photos/seed/manifesto/1200/800", "ar://7xv91manifesto", "bafybeih7f4manifesto", 2400000, "mirrored", now.minus(Duration.ofHours(20)).toString());
     MediaAsset space = new MediaAsset("media_space", "user_librarian", "weekly-space.mp4", "video", "https://picsum.photos/seed/space/1200/800", "ar://weekly-space", "ar://space-video", 84000000, "stored", now.minus(Duration.ofHours(12)).toString());
     media.add(manifest);
     media.add(space);
 
-    posts.add(seedPost("post_archive", "user_archive", "@archive", "Whale Archive", "vault.social", "统一 posts、replies、media 后，社交层可以直接成为出版资产的上下文索引。", "ar://post-archive", "attestation://archive/genesis", List.of("链上身份", "永久内容"), List.of(), 38, 128, now.minus(Duration.ofMinutes(130))));
-    SocialPost librarian = seedPost("post_librarian", "user_librarian", "@librarian", "Node Librarian", "readers.polkadot", "新媒体上传已同步到 Arweave 与 IPFS 双存储层。只要内容哈希一致，前端、实例、检索器都能独立重建同一份帖子上下文。", "ar://post-librarian", "storage://arweave/S1NfXo2...8vdP", List.of("Arweave", "IPFS", "永久媒体"), List.of(PostMedia.from(manifest)), 21, 64, now.minus(Duration.ofMinutes(90)));
+    posts.add(seedPost("post_archive", "user_archive", "@archive", "Whale Archive", "摩尔1号", "统一 posts、replies、media 后，社交层可以直接成为出版资产的上下文索引。", "ar://post-archive", "attestation://archive/genesis", List.of("链上身份", "永久内容"), List.of(), 38, 128, now.minus(Duration.ofMinutes(130))));
+    SocialPost librarian = seedPost("post_librarian", "user_librarian", "@librarian", "Node Librarian", "摩尔2号", "新媒体上传已同步到 Arweave 与 IPFS 双存储层。只要内容哈希一致，前端、实例、检索器都能独立重建同一份帖子上下文。", "ar://post-librarian", "storage://arweave/S1NfXo2...8vdP", List.of("Arweave", "IPFS", "永久媒体"), List.of(PostMedia.from(manifest)), 21, 64, now.minus(Duration.ofMinutes(90)));
     posts.add(librarian);
-    posts.add(seedPost("post_fedilab", "user_fedilab", "@fedilab", "Open Federation Lab", "relay.zone", "接下来要把当前的 relay server 从“扫码 mint”升级为 ActivityPub + 媒体索引 + 实时会话网关，让不同实例之间的关注、转发和聊天真正互通。", "ar://post-fedilab", "relay://federation/upgrade-plan", List.of("ActivityPub", "实时聊天", "Spring Boot"), List.of(), 55, 102, now.minus(Duration.ofMinutes(45))));
-    posts.add(seedReply("reply_archive_1", "user_librarian", "@librarian", "Node Librarian", "readers.polkadot", "统一 posts 之后，评论不再是孤立记录，线程、引用和排序都能复用同一套内容基础设施。", "post_archive", now.minus(Duration.ofMinutes(105))));
-    posts.add(seedReply("reply_archive_2", "user_fedilab", "@fedilab", "Open Federation Lab", "relay.zone", "后面接 ActivityPub 的时候，也能直接把 reply 当作 Note 的一种关系分支来处理。", "post_archive", now.minus(Duration.ofMinutes(95))));
+    posts.add(seedPost("post_fedilab", "user_fedilab", "@fedilab", "Open Federation Lab", "摩尔3号", "接下来要把当前的 relay server 从“扫码 mint”升级为 ActivityPub + 媒体索引 + 实时会话网关，让不同实例之间的关注、转发和聊天真正互通。", "ar://post-fedilab", "relay://federation/upgrade-plan", List.of("ActivityPub", "实时聊天", "Spring Boot"), List.of(), 55, 102, now.minus(Duration.ofMinutes(45))));
+    posts.add(seedReply("reply_archive_1", "user_librarian", "@librarian", "Node Librarian", "摩尔2号", "统一 posts 之后，评论不再是孤立记录，线程、引用和排序都能复用同一套内容基础设施。", "post_archive", now.minus(Duration.ofMinutes(105))));
+    posts.add(seedReply("reply_archive_2", "user_fedilab", "@fedilab", "Open Federation Lab", "摩尔3号", "后面接 ActivityPub 的时候，也能直接把 reply 当作 Note 的一种关系分支来处理。", "post_archive", now.minus(Duration.ofMinutes(95))));
 
     Conversation conv = new Conversation();
     conv.id = "conv_curator";
@@ -1849,6 +2216,34 @@ class SocialService {
     follows.put("user_fedilab", new HashSet<>(List.of("user_archive")));
     refreshPostCounts();
     refreshFollowCounts();
+  }
+
+  private void normalizeMoleInstances() {
+    Map<String, String> names = new HashMap<>(Map.of(
+        "vault.social", "摩尔1号",
+        "readers.polkadot", "摩尔2号",
+        "relay.zone", "摩尔3号",
+        "storage.zone", "摩尔4号"
+    ));
+    List<FederationInstance> normalized = new ArrayList<>();
+    int next = 1;
+    for (FederationInstance item : instances) {
+      String name = Strings.or(names.get(item.name), item.name);
+      if (!Strings.hasText(name) || !name.startsWith("摩尔")) {
+        name = "摩尔" + next + "号";
+      }
+      names.put(item.name, name);
+      normalized.add(new FederationInstance(name, item.focus, item.members, item.latency, item.status));
+      next++;
+    }
+    instances.clear();
+    instances.addAll(normalized);
+    for (SocialUser user : users) {
+      user.instance = Strings.or(names.get(user.instance), user.instance);
+    }
+    for (SocialPost post : posts) {
+      post.instance = Strings.or(names.get(post.instance), post.instance);
+    }
   }
 
   private SocialUser seedUser(String id, String handle, String displayName, String bio, String instance, String wallet, String avatarUrl, int followers, int following, Instant createdAt) {
@@ -2024,16 +2419,23 @@ class ApiException extends RuntimeException {
 }
 
 class Env {
+  static String get(String key, String fallback) {
+    String property = System.getProperty(key);
+    if (Strings.hasText(property)) return property;
+    String environment = System.getenv(key);
+    return Strings.hasText(environment) ? environment : fallback;
+  }
+
   static String current() {
-    return System.getProperty("APP_ENV", System.getProperty("ENV", "development")).toLowerCase(Locale.ROOT);
+    return Env.get("APP_ENV", Env.get("ENV", "development")).toLowerCase(Locale.ROOT);
   }
 
   static boolean cookieSecure() {
-    return "none".equalsIgnoreCase(cookieSameSite()) || "true".equalsIgnoreCase(System.getProperty("COOKIE_SECURE", "false"));
+    return "none".equalsIgnoreCase(cookieSameSite()) || "true".equalsIgnoreCase(Env.get("COOKIE_SECURE", "false"));
   }
 
   static String cookieSameSite() {
-    return System.getProperty("COOKIE_SAMESITE", "Lax");
+    return Env.get("COOKIE_SAMESITE", "Lax");
   }
 
   static boolean truthy(String value) {
@@ -2043,7 +2445,7 @@ class Env {
 
   static long longValue(String key, long fallback) {
     try {
-      return Long.parseLong(System.getProperty(key, Long.toString(fallback)).trim());
+      return Long.parseLong(Env.get(key, Long.toString(fallback)).trim());
     } catch (NumberFormatException err) {
       return fallback;
     }
@@ -2195,6 +2597,11 @@ class ChatMessage {
   public String senderId;
   public String senderHandle;
   public String body;
+  public String assetUri;
+  public String chainId;
+  public String txHash;
+  public String contractAddress;
+  public String explorerUrl;
   public String createdAt;
 
   ChatMessage() {
@@ -2216,8 +2623,29 @@ class Conversation {
   public List<String> participantIds = new ArrayList<>();
   public String initiatorId;
   public boolean encrypted;
+  public String assetUri;
+  public String chainId;
+  public String txHash;
+  public String contractAddress;
+  public String explorerUrl;
+  public boolean crossInstance;
+  public String federationRoute;
   public List<ChatMessage> messages = new ArrayList<>();
   public String updatedAt;
+}
+
+class ChainAsset {
+  final String chainId;
+  final String txHash;
+  final String contractAddress;
+  final String explorerUrl;
+
+  ChainAsset(String chainId, String txHash, String contractAddress, String explorerUrl) {
+    this.chainId = chainId;
+    this.txHash = txHash;
+    this.contractAddress = contractAddress;
+    this.explorerUrl = explorerUrl;
+  }
 }
 
 class FederationInstance {
@@ -2386,6 +2814,7 @@ class CreateUserRequest {
 class UpdateUserRequest {
   public String displayName;
   public String bio;
+  public String instance;
   public String avatarUrl;
   public List<UserField> fields;
   public List<String> featuredTags;
@@ -2405,6 +2834,7 @@ class CreateMediaRequest {
 
 class CreatePostRequest {
   public String authorId;
+  public String instance;
   public String kind;
   public String content;
   public String visibility;

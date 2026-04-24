@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS social_users (
     id TEXT PRIMARY KEY,
     handle TEXT NOT NULL UNIQUE,
@@ -118,6 +120,11 @@ CREATE TABLE IF NOT EXISTS user_follows (
     CHECK (follower_id <> followee_id)
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_social_posts_author_created_at
     ON social_posts(author_id, created_at DESC);
 
@@ -129,3 +136,5 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_owner_created_at
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_created_at
     ON chat_messages(conversation_id, created_at DESC);
+
+COMMIT;

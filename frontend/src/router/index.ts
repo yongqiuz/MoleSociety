@@ -4,6 +4,7 @@ import LoginPage from '../pages/LoginPage.vue';
 import LogoutPage from '../pages/LogoutPage.vue';
 import SettingsPage from '../pages/SettingsPage.vue';
 import ProfileEditPage from '../pages/ProfileEditPage.vue';
+import NotFoundPage from '../pages/NotFoundPage.vue';
 import AppearanceSettings from '../components/settings/AppearanceSettings.vue';
 import AccountSettings from '../components/settings/AccountSettings.vue';
 import PlaceholderSettings from '../components/settings/PlaceholderSettings.vue';
@@ -67,6 +68,15 @@ const router = createRouter({
           component: AccountSettings,
         },
       ],
+    },
+    {
+      path: '/404',
+      name: 'not-found',
+      component: NotFoundPage,
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      redirect: '/404',
     },
   ],
 });

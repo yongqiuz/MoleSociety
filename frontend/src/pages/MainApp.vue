@@ -10,6 +10,7 @@ import {
   fetchPostThread,
   fetchSocialBootstrap,
   fetchSocialBootstrapMine,
+  updateUserProfile,
   voteOnPoll,
   type BootstrapPayload,
   type FederationInstance,
@@ -109,6 +110,11 @@ type MessageCard = {
   from: 'me' | 'peer';
   text: string;
   time: string;
+  assetUri?: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
 };
 
 type ConversationCard = {
@@ -116,6 +122,13 @@ type ConversationCard = {
   name: string;
   handle: string;
   status: string;
+  crossInstance: boolean;
+  federationRoute: string;
+  assetUri?: string;
+  chainId?: string;
+  txHash?: string;
+  contractAddress?: string;
+  explorerUrl?: string;
   avatarLabel: string;
   participantId?: string;
   messages: MessageCard[];
@@ -144,111 +157,6 @@ const utilityNavItems: { label: string; key: Section; icon: Component }[] = [
 
 // settingsMenu removed - moved to SettingsPage.vue
 
-const fallbackUser: SocialUser = {
-  id: 'user_local',
-  handle: '@vico',
-  displayName: 'Vico',
-  bio: '在离线模式下继续浏览内容与草稿。',
-  instance: 'vault.social',
-  wallet: '0xlocal',
-  avatarUrl: '',
-  fields: [],
-  featuredTags: [],
-  isBot: false,
-  followers: 238,
-  following: 121,
-  createdAt: new Date().toISOString(),
-};
-
-const fallbackPeople: SocialUser[] = [
-  fallbackUser,
-  {
-    id: 'user_archive',
-    handle: '@archive',
-    displayName: 'Whale Archive',
-    bio: '为创作者提供永久内容归档与链上身份锚定。',
-    instance: 'vault.social',
-    wallet: '0xa18f',
-    avatarUrl: '',
-    fields: [],
-    featuredTags: [],
-    isBot: false,
-    followers: 1284,
-    following: 312,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'user_librarian',
-    handle: '@librarian',
-    displayName: 'Node Librarian',
-    bio: '把书籍确权、媒体存储和社交关系连接起来。',
-    instance: 'readers.polkadot',
-    wallet: '0x78fe',
-    avatarUrl: '',
-    fields: [],
-    featuredTags: [],
-    isBot: false,
-    followers: 932,
-    following: 221,
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const fallbackInstances: FederationInstance[] = [
-  { name: 'vault.social', focus: '创作者主权与链上身份', members: '12.4k', latency: '43 ms', status: 'healthy' },
-  { name: 'readers.polkadot', focus: '阅读社群与数字馆藏', members: '8.9k', latency: '51 ms', status: 'healthy' },
-  { name: 'relay.zone', focus: '跨实例消息转发', members: '3.1k', latency: '37 ms', status: 'healthy' },
-];
-
-const fallbackPosts: FeedCard[] = [
-  {
-    id: 'local-post-1',
-    author: 'Whale Archive',
-    handle: '@archive',
-    instance: 'vault.social',
-    kind: 'post',
-    time: '刚刚',
-    content: '欢迎来到 Whale Vault Social。本地离线预览模式。',
-    type: 'post',
-    interaction: 'anyone',
-    bio: '离线回退内容',
-    tags: ['离线模式', '社交界面'],
-    chainProof: 'local://fallback/post-1',
-    stats: { replies: 3, boosts: 8, likes: 23 },
-  },
-];
-
-const fallbackAssets: AssetCard[] = [
-  {
-    id: 'local-asset-1',
-    title: 'fallback-manifesto.png',
-    network: 'Arweave 镜像队列',
-    cid: 'local-preview',
-    size: '0.38 MB',
-    retention: '本地预览',
-    url: '',
-  },
-];
-
-const fallbackConversations: ConversationCard[] = [
-  {
-    id: 'local-conversation',
-    name: 'Archive Curator',
-    handle: '@curator@vault.social',
-    status: '回退模式',
-    avatarLabel: 'A',
-    participantId: 'user_archive',
-    messages: [
-      {
-        id: 'local-message',
-        from: 'peer',
-        text: '后端恢复后，这里会自动切回真实会话数据。',
-        time: '刚刚',
-      },
-    ],
-  },
-];
-
 const currentSection = ref<Section>('home');
 const currentUser = ref<SocialUser | null>(null);
 const people = ref<SocialUser[]>([]);
@@ -276,6 +184,8 @@ const followedUsers = ref<Record<string, boolean>>({});
 const likedPosts = ref<Record<string, boolean>>({});
 const boostedPosts = ref<Record<string, boolean>>({});
 const bookmarkedPosts = ref<Record<string, boolean>>({});
+const selectedInstanceName = ref('all');
+const showInstanceDropdown = ref(false);
 const selectedPostId = ref('');
 const threadLoading = ref(false);
 const threadError = ref('');
@@ -346,6 +256,10 @@ const activeConversationPeer = computed(() => {
   return people.value.find((person) => person.id === conversation.participantId) ?? null;
 });
 
+function isCrossInstanceUser(user: SocialUser) {
+  return Boolean(currentUser.value && currentUser.value.instance !== user.instance);
+}
+
 const mediaCount = computed(() => posts.value.filter((post) => post.media).length + assets.value.length);
 
 const myTimeline = computed(() => {
@@ -363,6 +277,51 @@ const timeline = computed(() => {
     [post.author, post.handle, post.content, ...post.tags].join(' ').toLowerCase().includes(query),
   );
 });
+
+const selectedInstance = computed(() =>
+  instances.value.find((instance) => instance.name === selectedInstanceName.value) ?? null,
+);
+
+const activeProfileInstanceName = computed(() =>
+  selectedInstanceName.value === 'all'
+    ? currentUser.value?.instance || '摩尔1号'
+    : selectedInstanceName.value,
+);
+
+const homeTimeline = computed(() => {
+  if (selectedInstanceName.value === 'all') return timeline.value;
+  return timeline.value.filter((post) => post.instance === selectedInstanceName.value);
+});
+
+async function selectInstance(name: string) {
+  selectedInstanceName.value = name;
+  showInstanceDropdown.value = false;
+  if (name === 'all') return;
+  if (!currentUser.value) return;
+  if (!apiOnline.value) {
+    goToNotFound();
+    return;
+  }
+
+  try {
+    const updatedUser = await updateUserProfile(currentUser.value.id, { instance: name });
+    currentUser.value = updatedUser;
+    people.value = people.value.map((person) => (person.id === updatedUser.id ? updatedUser : person));
+    const payload = await fetchSocialBootstrap();
+    applyBootstrap(payload);
+    apiOnline.value = true;
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    goToNotFound();
+  }
+}
+
+function toggleInstanceDropdown() {
+  showInstanceDropdown.value = !showInstanceDropdown.value;
+}
 
 const recommendedPeople = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -391,7 +350,7 @@ const trendingTags = computed(() => {
 });
 
 const serviceNotice = computed(() =>
-  errorMessage.value ? '当前展示的是本地预览内容，社区恢复后会自动同步。' : '跨实例动态正在持续刷新。',
+  errorMessage.value || '跨实例动态正在持续刷新。',
 );
 
 const currentSectionInfo = computed(() => {
@@ -438,19 +397,19 @@ const curatedLists = computed(() => [
     id: 'list-creators',
     title: '链上创作者',
     summary: '关注独立创作者、长期写作者和内容档案馆。',
-    count: `${recommendedPeople.value.length || 3} 位成员`,
+    count: `${recommendedPeople.value.length} 位成员`,
   },
   {
     id: 'list-readers',
     title: '阅读与知识节点',
     summary: '聚合阅读社群、图书馆节点和内容策展者。',
-    count: `${instances.value.length || 3} 个实例`,
+    count: `${instances.value.length} 个实例`,
   },
   {
     id: 'list-archives',
     title: '永久存储观察',
     summary: '跟踪媒体上链、归档状态和内容留存趋势。',
-    count: `${assets.value.length || 1} 个资源`,
+    count: `${assets.value.length} 个资源`,
   },
 ]);
 
@@ -462,7 +421,7 @@ const followedTopicCards = computed(() =>
 );
 
 const mentionItems = computed(() => {
-  const handle = currentUser.value?.handle ?? '@vico';
+  const handle = currentUser.value?.handle ?? '';
   return conversations.value.map((conversation) => ({
     id: conversation.id,
     title: conversation.name,
@@ -518,31 +477,6 @@ function toggleBookmark(postId: string) {
   bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: !bookmarkedPosts.value[postId] };
 }
 
-function shortProof(proof: string) {
-  if (!proof) return '链上凭证待同步';
-  return proof.length > 36 ? `${proof.slice(0, 16)}...${proof.slice(-10)}` : proof;
-}
-
-function shortAddress(address: string) {
-  if (!address) return '';
-  return address.length > 18 ? `${address.slice(0, 10)}...${address.slice(-8)}` : address;
-}
-
-function proofLabel(proof: string) {
-  if (!proof) return '等待存证';
-  if (proof.startsWith('attestation://')) return 'Attestation';
-  if (proof.startsWith('ipfs://')) return 'IPFS';
-  if (proof.startsWith('ar://')) return 'Arweave';
-  if (proof.startsWith('local://')) return '本地预览';
-  return 'Hash Proof';
-}
-
-function proofStatus(proof: string) {
-  if (!proof || proof.includes('pending')) return '待上链';
-  if (proof.startsWith('local://')) return '本地草稿';
-  return '已上链';
-}
-
 // toneClass removed - moved to AppearanceSettings.vue
 
 // settings functions removed - moved to SettingsPage.vue / AppearanceSettings.vue
@@ -570,7 +504,7 @@ function avatarText(name: string) {
 
 function profileLabel(user: SocialUser | null) {
   if (!user) return '';
-  return `${user.handle}@${user.instance}`;
+  return `@${activeProfileInstanceName.value}`;
 }
 
 function resolveAuthenticatedUser(users: SocialUser[]) {
@@ -683,7 +617,14 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     id: conversation.id,
     name: resolvedTitle,
     handle: resolvedHandle,
-    status: conversation.encrypted ? '端到端加密会话' : '标准会话',
+    status: conversation.crossInstance ? '跨联邦会话' : conversation.encrypted ? '端到端加密会话' : '同实例会话',
+    crossInstance: Boolean(conversation.crossInstance),
+    federationRoute: conversation.federationRoute || '',
+    assetUri: conversation.assetUri,
+    chainId: conversation.chainId,
+    txHash: conversation.txHash,
+    contractAddress: conversation.contractAddress,
+    explorerUrl: conversation.explorerUrl,
     avatarLabel: avatarText(resolvedTitle),
     participantId: fallbackPeer?.id,
     messages: conversation.messages.map((message) => ({
@@ -691,12 +632,21 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
       from: message.senderId === userId ? 'me' : 'peer',
       text: message.body,
       time: formatTimestamp(message.createdAt),
+      assetUri: message.assetUri,
+      chainId: message.chainId,
+      txHash: message.txHash,
+      contractAddress: message.contractAddress,
+      explorerUrl: message.explorerUrl,
     })),
   };
 }
 
 function findDirectConversationWith(userId: string) {
   return conversations.value.find((conversation) => conversation.participantId === userId);
+}
+
+function goToNotFound() {
+  void router.replace('/404');
 }
 
 async function startConversation(targetUser: SocialUser) {
@@ -712,29 +662,20 @@ async function startConversation(targetUser: SocialUser) {
 
   saving.value = true;
   try {
-    if (apiOnline.value) {
-      const createdConversation = await createConversation({
-        title: targetUser.displayName,
-        participantIds: [targetUser.id],
-        encrypted: false,
-      });
-
-      const mappedConversation = toConversationCard(createdConversation, currentUser.value.id);
-      conversations.value = [mappedConversation, ...conversations.value.filter((item) => item.id !== mappedConversation.id)];
-      selectedConversationId.value = mappedConversation.id;
-    } else {
-      const localConversation: ConversationCard = {
-        id: `local-conversation-${Date.now()}`,
-        name: targetUser.displayName,
-        handle: `${targetUser.handle}@${targetUser.instance}`,
-        status: '本地草稿会话',
-        avatarLabel: avatarText(targetUser.displayName),
-        participantId: targetUser.id,
-        messages: [],
-      };
-      conversations.value = [localConversation, ...conversations.value];
-      selectedConversationId.value = localConversation.id;
+    if (!apiOnline.value) {
+      goToNotFound();
+      return;
     }
+
+    const createdConversation = await createConversation({
+      title: isCrossInstanceUser(targetUser) ? `跨联邦：${targetUser.displayName}` : targetUser.displayName,
+      participantIds: [targetUser.id],
+      encrypted: false,
+    });
+
+    const mappedConversation = toConversationCard(createdConversation, currentUser.value.id);
+    conversations.value = [mappedConversation, ...conversations.value.filter((item) => item.id !== mappedConversation.id)];
+    selectedConversationId.value = mappedConversation.id;
 
     currentSection.value = 'messages';
     messageDraft.value = '';
@@ -744,15 +685,15 @@ async function startConversation(targetUser: SocialUser) {
       void router.push({ path: '/login', query: { redirect: '/app' } });
       return;
     }
-    errorMessage.value = error instanceof Error ? error.message : '暂时无法创建会话';
+    goToNotFound();
   } finally {
     saving.value = false;
   }
 }
 
 function applyBootstrap(payload: BootstrapPayload) {
-  currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? fallbackUser;
-  people.value = payload.users.length ? payload.users : fallbackPeople;
+  currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? null;
+  people.value = payload.users;
   posts.value = payload.feed.map(toFeedCard);
   assets.value = payload.media.map(toAssetCard);
   const mappedConversations = payload.conversations.map((conversation) =>
@@ -766,7 +707,7 @@ function applyBootstrap(payload: BootstrapPayload) {
       ),
   );
   conversations.value = dedupedConversations;
-  instances.value = payload.instances.length ? payload.instances : fallbackInstances;
+  instances.value = payload.instances;
   selectedConversationId.value = conversations.value[0]?.id ?? '';
 }
 
@@ -776,35 +717,8 @@ async function loadMyFeed() {
     return;
   }
 
-  try {
-    const payload = await fetchSocialBootstrapMine();
-    myPosts.value = payload.feed.map(toFeedCard);
-  } catch {
-    myPosts.value = currentUser.value
-      ? posts.value.filter((post) => post.author === currentUser.value?.displayName || post.handle === currentUser.value?.handle)
-      : [];
-  }
-}
-
-function applyFallback(message: string) {
-  apiOnline.value = false;
-  errorMessage.value = message;
-  currentUser.value = resolveAuthenticatedUser(fallbackPeople) ?? fallbackUser;
-  people.value = fallbackPeople;
-  posts.value = fallbackPosts;
-  myPosts.value = fallbackPosts.filter((post) => post.author === currentUser.value?.displayName || post.handle === currentUser.value?.handle);
-  assets.value = fallbackAssets;
-  conversations.value = fallbackConversations;
-  instances.value = fallbackInstances;
-  selectedConversationId.value = fallbackConversations[0].id;
-}
-
-function buildLocalThread(postId: string) {
-  const focusPost = posts.value.find((post) => post.id === postId) ?? null;
-  threadFocusPost.value = focusPost;
-  threadAncestors.value = [];
-  threadReplies.value = posts.value.filter((post) => post.parentPostId === postId);
-  activeReplyTarget.value = focusPost;
+  const payload = await fetchSocialBootstrapMine();
+  myPosts.value = payload.feed.map(toFeedCard);
 }
 
 function bumpReplyCount(postId: string) {
@@ -898,8 +812,7 @@ async function loadBootstrap() {
       await router.replace({ path: '/login', query: { redirect: '/app' } });
       return;
     }
-    const message = error instanceof Error ? error.message : '暂时无法连接社区服务';
-    applyFallback(message);
+    goToNotFound();
   } finally {
     loading.value = false;
   }
@@ -917,11 +830,7 @@ async function openPostDetail(postId: string, focusComposer = true) {
   threadReplies.value = [];
 
   if (!apiOnline.value) {
-    buildLocalThread(postId);
-    threadLoading.value = false;
-    if (focusComposer) {
-      await focusReplyComposer();
-    }
+    goToNotFound();
     return;
   }
 
@@ -936,9 +845,7 @@ async function openPostDetail(postId: string, focusComposer = true) {
       await focusReplyComposer();
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '暂时无法加载讨论串';
-    threadError.value = message;
-    buildLocalThread(postId);
+    goToNotFound();
   } finally {
     threadLoading.value = false;
   }
@@ -956,45 +863,28 @@ async function submitReply() {
   const rootPostId = threadFocusPost.value.rootPostId || threadFocusPost.value.id;
   saving.value = true;
   try {
-    if (apiOnline.value) {
-      await createPost({
-        authorId: currentUser.value.id,
-        kind: 'reply',
-        content: replyDraft.value.trim(),
-        visibility: 'public',
-        interaction: 'anyone',
-        storageUri: `draft://reply/${Date.now()}`,
-        attestationUri: `attestation://reply/${Date.now()}`,
-        tags: targetPost.tags.slice(0, 3),
-        mediaIds: [],
-        parentPostId: targetPost.id,
-        rootPostId,
-        type: 'post',
-      });
-      bumpReplyCount(targetPost.id);
-      await openPostDetail(selectedPostId.value || rootPostId);
-    } else {
-      const localId = `local-reply-${Date.now()}`;
-      const replyCard: FeedCard = {
-        id: localId,
-        author: currentUser.value.displayName,
-        handle: currentUser.value.handle,
-        instance: currentUser.value.instance,
-        kind: 'reply',
-        parentPostId: targetPost.id,
-        rootPostId,
-        replyDepth: (targetPost.replyDepth ?? 0) + 1,
-        time: '刚刚',
-        content: replyDraft.value.trim(),
-        type: 'post',
-        interaction: 'anyone',
-        tags: targetPost.tags.slice(0, 2),
-        chainProof: `local://${localId}`,
-        stats: { replies: 0, boosts: 0, likes: 0 },
-      };
-      threadReplies.value = [...threadReplies.value, replyCard];
-      bumpReplyCount(targetPost.id);
+    if (!apiOnline.value) {
+      goToNotFound();
+      return;
     }
+
+    await createPost({
+      authorId: currentUser.value.id,
+      instance: targetPost.instance || activeProfileInstanceName.value,
+      kind: 'reply',
+      content: replyDraft.value.trim(),
+      visibility: 'public',
+      interaction: 'anyone',
+      storageUri: `draft://reply/${Date.now()}`,
+      attestationUri: `attestation://reply/${Date.now()}`,
+      tags: targetPost.tags.slice(0, 3),
+      mediaIds: [],
+      parentPostId: targetPost.id,
+      rootPostId,
+      type: 'post',
+    });
+    bumpReplyCount(targetPost.id);
+    await openPostDetail(selectedPostId.value || rootPostId);
 
     replyDraft.value = '';
     activeReplyTarget.value = threadFocusPost.value;
@@ -1002,14 +892,18 @@ async function submitReply() {
     threadError.value = '';
     await focusReplyComposer();
   } catch (error) {
-    threadError.value = error instanceof Error ? error.message : '暂时无法发送回复';
+    goToNotFound();
   } finally {
     saving.value = false;
   }
 }
 
 async function handleVote(post: FeedCard, optionIndices: number[]) {
-  if (!apiOnline.value || !currentUser.value) return;
+  if (!currentUser.value) return;
+  if (!apiOnline.value) {
+    goToNotFound();
+    return;
+  }
   try {
     const updatedPost = await voteOnPoll(post.id, optionIndices);
     // Update local state
@@ -1020,13 +914,16 @@ async function handleVote(post: FeedCard, optionIndices: number[]) {
     if (threadFocusPost.value?.id === post.id) {
       threadFocusPost.value = toFeedCard(updatedPost);
     }
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '投票失败';
+  } catch {
+    goToNotFound();
   }
 }
 
 async function refreshPost(postId: string) {
-  if (!apiOnline.value) return;
+  if (!apiOnline.value) {
+    goToNotFound();
+    return;
+  }
   try {
     // We can use getPost API if we had one exported, otherwise reuse thread or feed.
     // Assuming getPost is available via search_web investigation or standard patterns.
@@ -1040,8 +937,8 @@ async function refreshPost(postId: string) {
     if (threadFocusPost.value?.id === postId) {
       threadFocusPost.value = toFeedCard(thread.post);
     }
-  } catch (error) {
-    console.error('Failed to refresh post:', error);
+  } catch {
+    goToNotFound();
   }
 }
 
@@ -1097,9 +994,14 @@ async function publishPost() {
 
   saving.value = true;
   try {
+    if (!apiOnline.value) {
+      goToNotFound();
+      return;
+    }
+
     let createdAsset: MediaAsset | null = null;
 
-    if (apiOnline.value && mediaPreview.value && mediaMeta.value) {
+    if (mediaPreview.value && mediaMeta.value) {
       createdAsset = await createMediaAsset({
         ownerId: currentUser.value.id,
         name: mediaMeta.value.name,
@@ -1113,52 +1015,23 @@ async function publishPost() {
       assets.value = [toAssetCard(createdAsset), ...assets.value];
     }
 
-    if (apiOnline.value) {
-      const createdPost = await createPost({
-        authorId: currentUser.value.id,
-        content: postDraft.value.trim() || '分享了一条新的媒体动态。',
-        visibility: visibility.value,
-        interaction: interaction.value,
-        storageUri: createdAsset?.storageUri || `draft://post/${Date.now()}`,
-        attestationUri: `attestation://frontend/${Date.now()}`,
-        tags: ['创作者动态', '联邦社交'],
-        mediaIds: createdAsset ? [createdAsset.id] : [],
-        type: 'post',
-        pollOptions: showPollEditor.value ? pollOptions.value.filter(o => o.trim()) : [],
-        pollExpiresIn: showPollEditor.value ? pollExpiresIn.value : 0,
-        pollMultiple: showPollEditor.value ? pollMultiple.value : false,
-      });
-      posts.value = [toFeedCard(createdPost), ...posts.value];
-      errorMessage.value = '';
-    } else {
-      const localId = `local-post-${Date.now()}`;
-      posts.value = [
-        {
-          id: localId,
-          author: currentUser.value.displayName,
-          handle: currentUser.value.handle,
-          instance: currentUser.value.instance,
-          kind: 'post',
-          time: '刚刚',
-          content: postDraft.value.trim() || '分享了一条新的媒体动态。',
-          type: 'post',
-          interaction: interaction.value,
-          tags: ['离线草稿'],
-          chainProof: `local://${localId}`,
-          media:
-            mediaPreview.value && mediaMeta.value
-              ? {
-                  name: mediaMeta.value.name,
-                  preview: mediaPreview.value,
-                  type: mediaMeta.value.type,
-                  sizeLabel: mediaMeta.value.sizeLabel,
-                }
-              : undefined,
-          stats: { replies: 0, boosts: 0, likes: 0 },
-        },
-        ...posts.value,
-      ];
-    }
+    const createdPost = await createPost({
+      authorId: currentUser.value.id,
+      instance: activeProfileInstanceName.value,
+      content: postDraft.value.trim() || '分享了一条新的媒体动态。',
+      visibility: visibility.value,
+      interaction: interaction.value,
+      storageUri: createdAsset?.storageUri || `draft://post/${Date.now()}`,
+      attestationUri: `attestation://frontend/${Date.now()}`,
+      tags: ['创作者动态', '联邦社交'],
+      mediaIds: createdAsset ? [createdAsset.id] : [],
+      type: 'post',
+      pollOptions: showPollEditor.value ? pollOptions.value.filter(o => o.trim()) : [],
+      pollExpiresIn: showPollEditor.value ? pollExpiresIn.value : 0,
+      pollMultiple: showPollEditor.value ? pollMultiple.value : false,
+    });
+    posts.value = [toFeedCard(createdPost), ...posts.value];
+    errorMessage.value = '';
 
     postDraft.value = '';
     mediaPreview.value = null;
@@ -1168,7 +1041,7 @@ async function publishPost() {
       void router.push({ path: '/login', query: { redirect: '/app' } });
       return;
     }
-    errorMessage.value = '发布没有成功，请稍后再试。';
+    goToNotFound();
   } finally {
     saving.value = false;
   }
@@ -1182,35 +1055,21 @@ async function sendMessage() {
     const targetConversation = activeConversation.value;
     if (!targetConversation) return;
 
-    if (apiOnline.value) {
-      const updatedConversation = await createConversationMessage(targetConversation.id, {
-        senderId: currentUser.value.id,
-        body: messageDraft.value.trim(),
-      });
-
-      conversations.value = conversations.value.map((conversation) =>
-        conversation.id === updatedConversation.id
-          ? toConversationCard(updatedConversation, currentUser.value?.id ?? null)
-          : conversation,
-      );
-    } else {
-      conversations.value = conversations.value.map((conversation) =>
-        conversation.id === targetConversation.id
-          ? {
-              ...conversation,
-              messages: [
-                ...conversation.messages,
-                {
-                  id: `local-message-${Date.now()}`,
-                  from: 'me',
-                  text: messageDraft.value.trim(),
-                  time: '刚刚',
-                },
-              ],
-            }
-          : conversation,
-      );
+    if (!apiOnline.value) {
+      goToNotFound();
+      return;
     }
+
+    const updatedConversation = await createConversationMessage(targetConversation.id, {
+      senderId: currentUser.value.id,
+      body: messageDraft.value.trim(),
+    });
+
+    conversations.value = conversations.value.map((conversation) =>
+      conversation.id === updatedConversation.id
+        ? toConversationCard(updatedConversation, currentUser.value?.id ?? null)
+        : conversation,
+    );
 
     messageDraft.value = '';
     errorMessage.value = '';
@@ -1233,7 +1092,7 @@ async function sendMessage() {
       }
     }
 
-    errorMessage.value = '发送没有成功，请稍后再试。';
+    goToNotFound();
   } finally {
     saving.value = false;
   }
@@ -1244,7 +1103,7 @@ onMounted(loadBootstrap);
 
 <template>
   <div class="min-h-screen bg-[var(--app-bg)] text-[color:var(--text-primary)] transition-colors duration-300 lg:h-screen lg:overflow-hidden" :style="themeStyles">
-    <div class="mx-auto max-w-[1280px] px-0 lg:h-screen lg:px-4 lg:overflow-hidden">
+    <div class="mx-auto max-w-[1440px] px-0 lg:h-screen lg:px-4 lg:overflow-hidden">
       <div v-if="errorMessage" class="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
         {{ serviceNotice }}
       </div>
@@ -1253,9 +1112,9 @@ onMounted(loadBootstrap);
         正在载入社区内容...
       </div>
 
-      <div v-else class="grid gap-0 overflow-hidden lg:h-[calc(100vh-24px)] lg:grid-cols-[300px_minmax(0,1fr)_300px]">
-        <aside class="border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar lg:border-b-0 lg:border-r">
-          <div class="space-y-3 p-4">
+      <div v-if="!loading" class="grid gap-0 overflow-visible lg:h-[calc(100vh-24px)] lg:grid-cols-[260px_minmax(0,1fr)_240px]">
+        <aside class="relative z-[80] min-h-0 max-h-[calc(100vh-24px)] overflow-hidden border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:max-h-none lg:border-b-0 lg:border-r">
+          <div class="max-h-[calc(100vh-24px)] min-h-0 space-y-3 overflow-y-auto overscroll-contain p-4 no-scrollbar lg:h-full lg:max-h-none">
             <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-4">
               <input
                 v-model="searchQuery"
@@ -1401,10 +1260,50 @@ onMounted(loadBootstrap);
               </div>
             </div>
 
+            <div v-if="currentSection === 'home'" class="relative z-[120]">
+              <button
+                @click="toggleInstanceDropdown"
+                class="flex w-full items-center justify-between rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-2.5 text-left transition hover:border-emerald-500/50"
+              >
+                <span class="min-w-0">
+                  <span class="block truncate text-sm font-semibold text-[color:var(--text-primary)]">
+                    {{ selectedInstanceName === 'all' ? '全部摩尔实例' : selectedInstanceName }}
+                  </span>
+                  <span class="block truncate text-xs text-[color:var(--text-muted)]">
+                    {{ selectedInstanceName === 'all' ? `${instances.length} 个实例` : selectedInstance?.focus }}
+                  </span>
+                </span>
+                <ChevronDown class="ml-3 h-4 w-4 shrink-0 text-[color:var(--text-muted)]" />
+              </button>
+              <div
+                v-if="showInstanceDropdown"
+                class="mt-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg,#ffffff)] text-[color:var(--text-primary,#0f172a)] shadow-[0_18px_48px_rgba(0,0,0,0.35)]"
+              >
+                <button
+                  @click="selectInstance('all')"
+                  class="w-full px-4 py-3 text-left transition first:rounded-t-xl hover:bg-[var(--panel-soft)]"
+                  :class="selectedInstanceName === 'all' ? 'text-emerald-400' : 'text-[color:var(--text-primary)]'"
+                >
+                  <span class="block text-sm font-semibold">全部摩尔实例</span>
+                  <span class="block text-xs text-[color:var(--text-muted)]">显示所有首页动态</span>
+                </button>
+                <button
+                  v-for="instance in instances"
+                  :key="instance.name"
+                  @click="selectInstance(instance.name)"
+                  class="w-full px-4 py-3 text-left transition last:rounded-b-xl hover:bg-[var(--panel-soft)]"
+                  :class="selectedInstanceName === instance.name ? 'text-emerald-400' : 'text-[color:var(--text-primary)]'"
+                >
+                  <span class="block text-sm font-semibold">{{ instance.name }}</span>
+                  <span class="block truncate text-xs text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</span>
+                </button>
+              </div>
+            </div>
+
           </div>
         </aside>
 
-        <main class="bg-[var(--frame-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar">
+        <main class="relative z-0 bg-[var(--frame-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar">
           <div class="border-b border-[color:var(--border-color)] px-6 py-6 transition-all duration-300">
             <div class="flex items-center gap-4 text-2xl font-bold text-[color:var(--text-primary)]">
               <component :is="currentSectionInfo.icon" class="w-7 h-7 text-emerald-500" />
@@ -1413,7 +1312,10 @@ onMounted(loadBootstrap);
           </div>
 
           <section v-if="currentSection === 'home'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="post in timeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+            <div v-if="homeTimeline.length === 0" class="px-6 py-16 text-center text-sm text-[color:var(--text-muted)]">
+              当前实例暂无动态。
+            </div>
+            <article v-for="post in homeTimeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex gap-3">
                 <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
                   {{ avatarText(post.author) }}
@@ -1421,7 +1323,7 @@ onMounted(loadBootstrap);
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
-                    <span class="text-sm text-[color:var(--text-secondary)]">{{ post.handle }}@{{ post.instance }}</span>
+                    <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
                     <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
                   </div>
                   <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
@@ -1465,35 +1367,6 @@ onMounted(loadBootstrap);
 
                   <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
                     <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
-                  </div>
-
-                  <div v-if="post.media && (post.contractAddress || post.txHash)" class="mt-3 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3">
-                    <div class="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-400">链上凭证</div>
-                        <div class="mt-1 text-xs text-[color:var(--text-muted)]">真实链上写入结果</div>
-                      </div>
-                      <a
-                        v-if="post.explorerUrl"
-                        :href="post.explorerUrl"
-                        target="_blank"
-                        rel="noreferrer"
-                        class="text-xs font-medium text-emerald-300 transition hover:text-emerald-200"
-                      >
-                        在区块浏览器查看
-                      </a>
-                    </div>
-                    <div class="mt-3 grid gap-3 sm:grid-cols-2">
-                      <div v-if="post.contractAddress" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
-                        <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">合约地址</div>
-                        <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ post.contractAddress }}</div>
-                      </div>
-                      <div v-if="post.txHash" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
-                        <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">交易哈希</div>
-                        <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ post.txHash }}</div>
-                      </div>
-                    </div>
-                    <div v-if="post.chainId" class="mt-3 text-xs text-[color:var(--text-muted)]">链 ID：{{ post.chainId }}</div>
                   </div>
 
                   <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
@@ -1602,7 +1475,7 @@ onMounted(loadBootstrap);
                   >
                     <div class="flex items-center gap-2 text-sm">
                       <span class="font-semibold text-[color:var(--text-primary)]">{{ ancestor.author }}</span>
-                      <span class="text-[color:var(--text-secondary)]">{{ ancestor.handle }}@{{ ancestor.instance }}</span>
+                      <span class="text-[color:var(--text-secondary)]">@{{ ancestor.instance }}</span>
                       <span class="text-xs text-[color:var(--text-muted)]">{{ ancestor.time }}</span>
                     </div>
                     <div class="mt-2 whitespace-pre-wrap text-sm leading-6 text-[color:var(--text-secondary)]">
@@ -1620,7 +1493,7 @@ onMounted(loadBootstrap);
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <span class="text-[20px] font-semibold text-[color:var(--text-primary)]">{{ threadFocusPost.author }}</span>
-                      <span class="text-base text-[color:var(--text-secondary)]">{{ threadFocusPost.handle }}@{{ threadFocusPost.instance }}</span>
+                      <span class="text-base text-[color:var(--text-secondary)]">@{{ threadFocusPost.instance }}</span>
                       <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-emerald-500">
                         {{ threadFocusPost.kind === 'reply' ? '回复' : '帖子' }}
                       </span>
@@ -1703,35 +1576,6 @@ onMounted(loadBootstrap);
                       <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[420px] w-full object-cover" />
                     </div>
 
-                    <div v-if="threadFocusPost.media && (threadFocusPost.contractAddress || threadFocusPost.txHash)" class="mt-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-4">
-                      <div class="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-400">链上凭证</div>
-                          <div class="mt-1 text-xs text-[color:var(--text-muted)]">真实链上写入结果</div>
-                        </div>
-                        <a
-                          v-if="threadFocusPost.explorerUrl"
-                          :href="threadFocusPost.explorerUrl"
-                          target="_blank"
-                          rel="noreferrer"
-                          class="text-xs font-medium text-emerald-300 transition hover:text-emerald-200"
-                        >
-                          在区块浏览器查看
-                        </a>
-                      </div>
-                      <div class="mt-3 grid gap-3 md:grid-cols-2">
-                        <div v-if="threadFocusPost.contractAddress" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
-                          <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">合约地址</div>
-                          <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ threadFocusPost.contractAddress }}</div>
-                        </div>
-                        <div v-if="threadFocusPost.txHash" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3">
-                          <div class="text-[10px] uppercase tracking-[0.18em] text-[color:var(--text-muted)]">交易哈希</div>
-                          <div class="mt-2 font-mono text-xs text-emerald-300 break-all">{{ threadFocusPost.txHash }}</div>
-                        </div>
-                      </div>
-                      <div v-if="threadFocusPost.chainId" class="mt-3 text-xs text-[color:var(--text-muted)]">链 ID：{{ threadFocusPost.chainId }}</div>
-                    </div>
-
                     <div v-if="threadFocusPost.tags.length" class="mt-4 flex flex-wrap gap-2">
                       <span
                         v-for="tag in threadFocusPost.tags"
@@ -1769,9 +1613,6 @@ onMounted(loadBootstrap);
                       >
                         <Bookmark :class="{'fill-current': bookmarkedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" />
                       </button>
-                      <span class="ml-auto truncate rounded-full bg-[var(--chip-bg)] px-3 py-2 text-[color:var(--text-muted)]">
-                        {{ shortProof(threadFocusPost.chainProof) }}
-                      </span>
                     </div>
                   </div>
                 </div>
@@ -1857,7 +1698,7 @@ onMounted(loadBootstrap);
                   >
                     <div class="flex items-center gap-2 text-sm">
                       <span class="font-semibold text-[color:var(--text-primary)]">{{ reply.author }}</span>
-                      <span class="text-[color:var(--text-secondary)]">{{ reply.handle }}@{{ reply.instance }}</span>
+                      <span class="text-[color:var(--text-secondary)]">@{{ reply.instance }}</span>
                       <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">
                         第 {{ (reply.replyDepth ?? 0) + 1 }} 层
                       </span>
@@ -1921,7 +1762,7 @@ onMounted(loadBootstrap);
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
-                    <span class="text-sm text-[color:var(--text-secondary)]">{{ post.handle }}@{{ post.instance }}</span>
+                    <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
                     <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
                   </div>
                   <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
@@ -1978,7 +1819,7 @@ onMounted(loadBootstrap);
                       <div class="flex items-center justify-between gap-2">
                         <div class="flex items-center gap-2 truncate">
                           <span class="font-bold text-[color:var(--text-primary)]">{{ post.author }}</span>
-                          <span class="text-sm text-[color:var(--text-muted)] truncate">{{ post.handle }}@{{ post.instance }}</span>
+                          <span class="text-sm text-[color:var(--text-muted)] truncate">@{{ post.instance }}</span>
                         </div>
                         <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
                       </div>
@@ -2120,7 +1961,7 @@ onMounted(loadBootstrap);
                         class="inline-flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/8 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-500/12 hover:text-emerald-200"
                       >
                         <MessageCircle class="h-4 w-4" />
-                        <span>发消息</span>
+                        <span>{{ isCrossInstanceUser(person) ? '跨联邦发消息' : '发消息' }}</span>
                       </button>
                       <button
                         @click="toggleFollow(person.id)"
@@ -2245,7 +2086,7 @@ onMounted(loadBootstrap);
           </section>
 
           <section v-else-if="currentSection === 'messages'" class="h-[calc(100vh-140px)] overflow-hidden">
-            <div class="grid h-full min-h-0 lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]">
+            <div class="grid h-full min-h-0 lg:grid-cols-[240px_minmax(0,1fr)]">
               <aside class="flex min-h-0 flex-col border-b border-[color:var(--border-color)] bg-[var(--panel-soft)] lg:border-b-0 lg:border-r">
                 <div class="border-b border-[color:var(--border-color)] px-5 py-5">
                   <div class="flex items-center justify-between gap-3">
@@ -2280,6 +2121,9 @@ onMounted(loadBootstrap);
                         <div class="shrink-0 text-xs text-[color:var(--text-muted)]">{{ conversation.messages[conversation.messages.length - 1]?.time || '' }}</div>
                       </div>
                       <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ conversation.handle }}</div>
+                      <div v-if="conversation.crossInstance" class="mt-1 truncate text-xs font-medium text-emerald-400">
+                        {{ conversation.federationRoute }}
+                      </div>
                       <div class="mt-2 truncate text-sm text-[color:var(--text-muted)]">
                         {{ conversation.messages[conversation.messages.length - 1]?.text || '还没有消息，开始打个招呼吧。' }}
                       </div>
@@ -2297,6 +2141,10 @@ onMounted(loadBootstrap);
                     <div class="min-w-0">
                       <div class="truncate text-lg font-semibold text-[color:var(--text-primary)]">{{ activeConversation.name }}</div>
                       <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ activeConversation.handle }}</div>
+                      <div v-if="activeConversation.crossInstance" class="mt-1 inline-flex max-w-full items-center gap-2 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                        <Globe class="h-3.5 w-3.5 shrink-0" />
+                        <span class="truncate">{{ activeConversation.federationRoute }}</span>
+                      </div>
                     </div>
                   </div>
 
