@@ -25,9 +25,7 @@ type ChallengeResponse = {
   expiresAt: string;
 };
 
-const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
-const defaultApiUrl = `http://${fallbackHost}:8080`;
-const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || defaultApiUrl).replace(/\/$/, '');
+const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || '').replace(/\/$/, '');
 console.log('[API] auth base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

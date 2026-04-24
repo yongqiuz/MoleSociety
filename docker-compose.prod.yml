@@ -48,8 +48,6 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        VITE_SOCIAL_API_URL: ${PUBLIC_BASE_URL}
     container_name: molesociety-frontend
     restart: unless-stopped
     depends_on:
