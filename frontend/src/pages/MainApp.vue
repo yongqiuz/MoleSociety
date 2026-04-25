@@ -64,6 +64,7 @@ type SettingsTab =
 
 type FeedCard = {
   id: string;
+  authorId: string;
   author: string;
   handle: string;
   instance: string;
@@ -582,6 +583,7 @@ function toFeedCard(post: SocialPost): FeedCard {
   const person = people.value.find((item) => item.id === post.authorId);
   return {
     id: post.id,
+    authorId: post.authorId,
     author: post.authorName,
     handle: post.authorHandle,
     instance: post.instance,
@@ -1553,12 +1555,21 @@ onBeforeUnmount(() => {
             </div>
             <article v-for="post in homeTimeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex gap-3">
-                <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
+                <button
+                  @click="goToUserProfile(post.authorId)"
+                  class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+                  title="查看用户主页"
+                >
                   {{ avatarText(post.author) }}
-                </div>
+                </button>
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                    <button
+                      @click="goToUserProfile(post.authorId)"
+                      class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                    >
+                      {{ post.author }}
+                    </button>
                     <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
                     <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
                   </div>
@@ -1710,7 +1721,12 @@ onBeforeUnmount(() => {
                     class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3"
                   >
                     <div class="flex items-center gap-2 text-sm">
-                      <span class="font-semibold text-[color:var(--text-primary)]">{{ ancestor.author }}</span>
+                      <button
+                        @click="goToUserProfile(ancestor.authorId)"
+                        class="font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                      >
+                        {{ ancestor.author }}
+                      </button>
                       <span class="text-[color:var(--text-secondary)]">@{{ ancestor.instance }}</span>
                       <span class="text-xs text-[color:var(--text-muted)]">{{ ancestor.time }}</span>
                     </div>
@@ -1723,12 +1739,21 @@ onBeforeUnmount(() => {
 
               <article class="px-5 py-6 transition hover:bg-[var(--panel-soft)]">
                 <div class="flex gap-4">
-                  <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900">
+                  <button
+                    @click="goToUserProfile(threadFocusPost.authorId)"
+                    class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900"
+                    title="查看用户主页"
+                  >
                     {{ avatarText(threadFocusPost.author) }}
-                  </div>
+                  </button>
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      <span class="text-[20px] font-semibold text-[color:var(--text-primary)]">{{ threadFocusPost.author }}</span>
+                      <button
+                        @click="goToUserProfile(threadFocusPost.authorId)"
+                        class="text-[20px] font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                      >
+                        {{ threadFocusPost.author }}
+                      </button>
                       <span class="text-base text-[color:var(--text-secondary)]">@{{ threadFocusPost.instance }}</span>
                       <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-emerald-500">
                         {{ threadFocusPost.kind === 'reply' ? '回复' : '帖子' }}
@@ -1933,7 +1958,12 @@ onBeforeUnmount(() => {
                     :style="{ marginLeft: replyOffset(reply) }"
                   >
                     <div class="flex items-center gap-2 text-sm">
-                      <span class="font-semibold text-[color:var(--text-primary)]">{{ reply.author }}</span>
+                      <button
+                        @click="goToUserProfile(reply.authorId)"
+                        class="font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                      >
+                        {{ reply.author }}
+                      </button>
                       <span class="text-[color:var(--text-secondary)]">@{{ reply.instance }}</span>
                       <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">
                         第 {{ (reply.replyDepth ?? 0) + 1 }} 层
@@ -1992,12 +2022,21 @@ onBeforeUnmount(() => {
             </article>
             <article v-for="post in myTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex gap-3">
-                <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
+                <button
+                  @click="goToUserProfile(post.authorId)"
+                  class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+                  title="查看用户主页"
+                >
                   {{ avatarText(post.author) }}
-                </div>
+                </button>
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                    <button
+                      @click="goToUserProfile(post.authorId)"
+                      class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                    >
+                      {{ post.author }}
+                    </button>
                     <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
                     <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
                   </div>
@@ -2048,13 +2087,22 @@ onBeforeUnmount(() => {
                 <article v-for="post in timeline" :key="post.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
                   <!-- Reuse Post View Here - Similar to Home Feed -->
                   <div class="flex gap-4">
-                    <div class="h-12 w-12 flex-none rounded-2xl bg-gradient-to-br from-indigo-200 to-emerald-200 flex items-center justify-center font-bold text-slate-800">
+                    <button
+                      @click="goToUserProfile(post.authorId)"
+                      class="h-12 w-12 flex-none rounded-2xl bg-gradient-to-br from-indigo-200 to-emerald-200 flex items-center justify-center font-bold text-slate-800"
+                      title="查看用户主页"
+                    >
                       {{ avatarText(post.author) }}
-                    </div>
+                    </button>
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between gap-2">
                         <div class="flex items-center gap-2 truncate">
-                          <span class="font-bold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                          <button
+                            @click="goToUserProfile(post.authorId)"
+                            class="font-bold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                          >
+                            {{ post.author }}
+                          </button>
                           <span class="text-sm text-[color:var(--text-muted)] truncate">@{{ post.instance }}</span>
                         </div>
                         <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
