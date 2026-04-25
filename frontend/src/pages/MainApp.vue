@@ -1304,11 +1304,20 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="flex items-center gap-3">
-              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
+              <button
+                @click="currentUser?.id && goToUserProfile(currentUser.id)"
+                class="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                title="查看我的主页"
+              >
                 {{ avatarText(currentUser?.displayName || 'W') }}
-              </div>
+              </button>
               <div class="min-w-0">
-                <div class="truncate text-[17px] font-semibold text-[color:var(--text-primary)]">{{ currentUser?.displayName }}</div>
+                <button
+                  @click="currentUser?.id && goToUserProfile(currentUser.id)"
+                  class="truncate text-[17px] font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                >
+                  {{ currentUser?.displayName }}
+                </button>
                 <div class="truncate text-sm text-[color:var(--text-secondary)]">{{ profileLabel(currentUser) }}</div>
               </div>
             </div>

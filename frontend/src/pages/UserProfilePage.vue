@@ -4,10 +4,12 @@ import { useRoute, useRouter } from 'vue-router';
 import { ChevronLeft } from 'lucide-vue-next';
 import { fetchSocialBootstrap, fetchUser, type SocialPost, type SocialUser } from '../api/socialApi';
 import { useAppearance } from '../composables/useAppearance';
+import { useAuth } from '../composables/useAuth';
 
 const route = useRoute();
 const router = useRouter();
 const { themeStyles, appearanceSettings } = useAppearance();
+const { currentUser } = useAuth();
 
 const loading = ref(true);
 const error = ref('');
@@ -15,6 +17,7 @@ const user = ref<SocialUser | null>(null);
 const posts = ref<SocialPost[]>([]);
 
 const targetId = computed(() => String(route.params.id || '').trim());
+const isSelfProfile = computed(() => currentUser.value?.id === targetId.value);
 
 function avatarText(name: string) {
   return name?.slice(0, 1).toUpperCase() || 'U';
@@ -68,6 +71,10 @@ function goBack() {
   router.back();
 }
 
+function goEditProfile() {
+  void router.push('/profile/edit');
+}
+
 onMounted(() => {
   void loadProfile();
 });
@@ -116,6 +123,13 @@ watch(
                   <div class="text-sm text-[color:var(--text-muted)]">{{ user.handle }}@{{ user.instance }}</div>
                 </div>
               </div>
+              <button
+                v-if="isSelfProfile"
+                @click="goEditProfile"
+                class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-400 transition hover:bg-emerald-500/20"
+              >
+                编辑资料
+              </button>
             </div>
 
             <p class="mt-4 whitespace-pre-wrap text-sm leading-7 text-[color:var(--text-secondary)]">{{ user.bio || '这个用户还没有填写简介。' }}</p>
