@@ -9,6 +9,7 @@ export type AuthSession = {
   instance: string;
   bio: string;
   avatarUrl: string;
+  backgroundUrl?: string;
   wallet: string;
   fields: UserField[];
   featuredTags: string[];

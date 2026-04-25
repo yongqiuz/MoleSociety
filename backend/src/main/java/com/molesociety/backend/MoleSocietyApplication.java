@@ -791,11 +791,12 @@ class PersistenceService {
     if (!databaseAvailable) return;
     exec(conn -> {
       try (PreparedStatement ps = conn.prepareStatement("""
-          INSERT INTO social_users(id, handle, display_name, bio, instance, wallet, avatar_url,
+          INSERT INTO social_users(id, handle, display_name, bio, instance, wallet, avatar_url, background_url,
             fields_json, featured_tags_json, is_bot, followers_count, following_count, created_at)
-          VALUES (?,?,?,?,?,?,?,?::jsonb,?::jsonb,?,?,?,?)
+          VALUES (?,?,?,?,?,?,?, ?,?::jsonb,?::jsonb,?,?,?,?)
           ON CONFLICT (id) DO UPDATE SET handle=EXCLUDED.handle, display_name=EXCLUDED.display_name,
             bio=EXCLUDED.bio, instance=EXCLUDED.instance, wallet=EXCLUDED.wallet, avatar_url=EXCLUDED.avatar_url,
+            background_url=EXCLUDED.background_url,
             fields_json=EXCLUDED.fields_json, featured_tags_json=EXCLUDED.featured_tags_json,
             is_bot=EXCLUDED.is_bot, followers_count=EXCLUDED.followers_count, following_count=EXCLUDED.following_count
           """)) {
@@ -806,12 +807,13 @@ class PersistenceService {
         ps.setString(5, user.instance);
         ps.setString(6, Strings.value(user.wallet));
         ps.setString(7, Strings.value(user.avatarUrl));
-        ps.setString(8, json(user.fields));
-        ps.setString(9, json(user.featuredTags));
-        ps.setBoolean(10, user.isBot);
-        ps.setInt(11, user.followers);
-        ps.setInt(12, user.following);
-        ps.setTimestamp(13, timestamp(user.createdAt));
+        ps.setString(8, Strings.value(user.backgroundUrl));
+        ps.setString(9, json(user.fields));
+        ps.setString(10, json(user.featuredTags));
+        ps.setBoolean(11, user.isBot);
+        ps.setInt(12, user.followers);
+        ps.setInt(13, user.following);
+        ps.setTimestamp(14, timestamp(user.createdAt));
         ps.executeUpdate();
       }
     });
@@ -1051,6 +1053,7 @@ class PersistenceService {
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS fields_json JSONB NOT NULL DEFAULT '[]'::jsonb");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS featured_tags_json JSONB NOT NULL DEFAULT '[]'::jsonb");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE");
+      st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS background_url TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'");
       st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS initiator_id TEXT");
       st.executeUpdate("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE");
@@ -1074,7 +1077,7 @@ class PersistenceService {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) state.instances.add(new FederationInstance(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)));
       }
-      try (PreparedStatement ps = conn.prepareStatement("SELECT id, handle, display_name, bio, instance, wallet, avatar_url, fields_json, featured_tags_json, is_bot, followers_count, following_count, created_at FROM social_users ORDER BY created_at DESC")) {
+      try (PreparedStatement ps = conn.prepareStatement("SELECT id, handle, display_name, bio, instance, wallet, avatar_url, background_url, fields_json, featured_tags_json, is_bot, followers_count, following_count, created_at FROM social_users ORDER BY created_at DESC")) {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) {
           SocialUser user = new SocialUser();
@@ -1085,6 +1088,7 @@ class PersistenceService {
           user.instance = rs.getString("instance");
           user.wallet = rs.getString("wallet");
           user.avatarUrl = rs.getString("avatar_url");
+          user.backgroundUrl = rs.getString("background_url");
           user.fields = parse(rs.getString("fields_json"), new TypeReference<List<UserField>>() {});
           user.featuredTags = parse(rs.getString("featured_tags_json"), new TypeReference<List<String>>() {});
           user.isBot = rs.getBoolean("is_bot");
@@ -1504,7 +1508,7 @@ class AuthService {
       persistence.deleteChallenge(req.nonce);
     }
 
-    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", "摩尔1号", wallet, ""));
+    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", "摩尔1号", wallet, "", ""));
     Account account = new Account();
     account.id = "acc_" + System.nanoTime();
     account.username = username;
@@ -1773,6 +1777,7 @@ class SocialService {
     user.instance = Strings.or(req.instance, "摩尔1号");
     user.wallet = Strings.value(req.wallet);
     user.avatarUrl = Strings.value(req.avatarUrl);
+    user.backgroundUrl = Strings.value(req.backgroundUrl);
     user.fields = new ArrayList<>();
     user.featuredTags = new ArrayList<>();
     user.createdAt = Instant.now().toString();
@@ -1792,6 +1797,7 @@ class SocialService {
     if (req.bio != null) user.bio = req.bio;
     if (req.instance != null) user.instance = resolveUserInstance(req.instance);
     if (req.avatarUrl != null) user.avatarUrl = req.avatarUrl;
+    if (req.backgroundUrl != null) user.backgroundUrl = req.backgroundUrl;
     if (req.fields != null) user.fields = req.fields;
     if (req.featuredTags != null) user.featuredTags = req.featuredTags;
     if (req.isBot != null) user.isBot = req.isBot;
@@ -2481,6 +2487,7 @@ class SocialUser {
   public String instance;
   public String wallet;
   public String avatarUrl;
+  public String backgroundUrl;
   public List<UserField> fields = new ArrayList<>();
   public List<String> featuredTags = new ArrayList<>();
   public boolean isBot;
@@ -2739,6 +2746,7 @@ class AuthSessionResponse {
   public String instance;
   public String bio;
   public String avatarUrl;
+  public String backgroundUrl;
   public String wallet;
   public List<UserField> fields = new ArrayList<>();
   public List<String> featuredTags = new ArrayList<>();
@@ -2752,6 +2760,7 @@ class AuthSessionResponse {
     res.instance = user.instance;
     res.bio = user.bio;
     res.avatarUrl = user.avatarUrl;
+    res.backgroundUrl = user.backgroundUrl;
     res.wallet = user.wallet;
     res.fields = user.fields;
     res.featuredTags = user.featuredTags;
@@ -2799,17 +2808,19 @@ class CreateUserRequest {
   public String instance;
   public String wallet;
   public String avatarUrl;
+  public String backgroundUrl;
 
   CreateUserRequest() {
   }
 
-  CreateUserRequest(String handle, String displayName, String bio, String instance, String wallet, String avatarUrl) {
+  CreateUserRequest(String handle, String displayName, String bio, String instance, String wallet, String avatarUrl, String backgroundUrl) {
     this.handle = handle;
     this.displayName = displayName;
     this.bio = bio;
     this.instance = instance;
     this.wallet = wallet;
     this.avatarUrl = avatarUrl;
+    this.backgroundUrl = backgroundUrl;
   }
 }
 
@@ -2818,6 +2829,7 @@ class UpdateUserRequest {
   public String bio;
   public String instance;
   public String avatarUrl;
+  public String backgroundUrl;
   public List<UserField> fields;
   public List<String> featuredTags;
   public Boolean isBot;

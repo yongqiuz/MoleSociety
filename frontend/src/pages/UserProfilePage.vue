@@ -101,7 +101,9 @@ watch(
 
       <div v-else-if="user" class="space-y-6">
         <section class="overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)]">
-          <div class="h-36 bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40"></div>
+          <div class="h-36 bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40">
+            <img v-if="user.backgroundUrl" :src="user.backgroundUrl" :alt="`${user.displayName} 背景图`" class="h-full w-full object-cover" />
+          </div>
           <div class="px-6 pb-6">
             <div class="-mt-10 flex flex-wrap items-end justify-between gap-4">
               <div class="flex items-end gap-4">

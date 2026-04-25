@@ -13,6 +13,7 @@ export type SocialUser = {
   instance: string;
   wallet: string;
   avatarUrl: string;
+  backgroundUrl?: string;
   fields: UserField[];
   featuredTags: string[];
   isBot: boolean;
@@ -191,6 +192,7 @@ export type UpdateUserRequest = {
   bio?: string;
   instance?: string;
   avatarUrl?: string;
+  backgroundUrl?: string;
   fields?: UserField[];
   featuredTags?: string[];
   isBot?: boolean;
