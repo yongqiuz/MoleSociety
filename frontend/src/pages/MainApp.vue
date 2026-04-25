@@ -1459,7 +1459,7 @@ onBeforeUnmount(() => {
 
               <!-- Media Preview (above poll) -->
               <div v-if="mediaPreview && mediaMeta" class="relative mt-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] group">
-                <img :src="mediaPreview" :alt="mediaMeta.name" class="max-h-48 w-full object-cover" />
+                <img :src="mediaPreview" :alt="mediaMeta.name" class="max-h-48 w-full object-contain bg-[var(--panel-contrast)]" />
                 <!-- Cancel Button -->
                 <button
                   @click="clearMedia"
@@ -1734,7 +1734,7 @@ onBeforeUnmount(() => {
                   </div>
 
                   <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
+                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
                   </div>
 
                   <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
@@ -1955,7 +1955,7 @@ onBeforeUnmount(() => {
                       v-if="threadFocusPost.media"
                       class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]"
                     >
-                      <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[420px] w-full object-cover" />
+                      <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
                     </div>
 
                     <div v-if="threadFocusPost.tags.length" class="mt-4 flex flex-wrap gap-2">
@@ -2164,7 +2164,7 @@ onBeforeUnmount(() => {
                   <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
                   <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
                   <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[420px] w-full object-cover" />
+                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
                   </div>
                   <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
                     <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
@@ -2257,7 +2257,7 @@ onBeforeUnmount(() => {
                       
                       <!-- Post Media (Explore Tab) -->
                       <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[500px] w-full object-cover" />
+                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
                       </div>
                       
                       <!-- Interaction Row -->
@@ -2429,7 +2429,7 @@ onBeforeUnmount(() => {
                       
                       <!-- Post Media (News Tab) -->
                       <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[500px] w-full object-cover" />
+                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
                       </div>
                       
                       <!-- Interaction Row -->
