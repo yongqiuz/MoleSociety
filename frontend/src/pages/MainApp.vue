@@ -405,12 +405,17 @@ const likedTimeline = computed(() => posts.value.filter((post) => likedPosts.val
 const bookmarkedTimeline = computed(() => posts.value.filter((post) => bookmarkedPosts.value[post.id]));
 
 const notificationItems = computed(() => {
-  const suggestedUsers = recommendedPeople.value.slice(0, 2).map((person) => ({
-    id: `follow-${person.id}`,
-    title: `${person.displayName} 开始在社区活跃`,
-    body: `${person.handle}@${person.instance} 发布了新的动态，适合加入你的关注流。`,
-    time: '刚刚',
-  }));
+  const suggestedUsers = recommendedPeople.value.slice(0, 2).map((person) => {
+    const hasPublished = posts.value.some((post) => post.authorId === person.id);
+    return {
+      id: `follow-${person.id}`,
+      title: `${person.displayName} 开始在社区活跃`,
+      body: hasPublished
+        ? `${person.handle}@${person.instance} 已发布动态，适合加入你的关注流。`
+        : `${person.handle}@${person.instance} 刚加入社区，欢迎关注。`,
+      time: '刚刚',
+    };
+  });
 
   const postEvents = timeline.value.slice(0, 2).map((post) => ({
     id: `post-${post.id}`,
