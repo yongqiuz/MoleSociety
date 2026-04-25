@@ -1,14 +1,12 @@
 import { computed, ref, watch } from 'vue';
 
 export type ColorScheme = 'auto' | 'light' | 'dark';
-export type ContrastMode = 'auto' | 'high';
+export type LanguageCode = 'zh-CN' | 'en-US';
 
 export type AppearanceSettings = {
-  language: string;
+  language: LanguageCode;
   timezone: string;
   colorScheme: ColorScheme;
-  contrast: ContrastMode;
-  emojiStyle: string;
   slowMode: boolean;
   autoplayGif: boolean;
   reduceMotion: boolean;
@@ -16,12 +14,19 @@ export type AppearanceSettings = {
 
 const STORAGE_KEY = 'whale-vault-appearance-settings';
 
+function detectLocalTimezone() {
+  if (typeof Intl === 'undefined') return 'UTC';
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 const defaultAppearanceSettings: AppearanceSettings = {
-  language: '简体中文',
-  timezone: '(GMT+08:00) Asia/Shanghai',
+  language: 'zh-CN',
+  timezone: detectLocalTimezone(),
   colorScheme: 'light',
-  contrast: 'auto',
-  emojiStyle: '自动',
   slowMode: false,
   autoplayGif: true,
   reduceMotion: false,
@@ -39,10 +44,20 @@ function loadSettings() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
-    const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const languageRaw = typeof parsed.language === 'string' ? parsed.language : '';
+    const timezoneRaw = typeof parsed.timezone === 'string' ? parsed.timezone : '';
+
+    const normalizedLanguage = languageRaw === 'English' ? 'en-US' : languageRaw === '简体中文' ? 'zh-CN' : languageRaw;
+    const normalizedTimezone = timezoneRaw.includes('/')
+      ? timezoneRaw
+      : defaultAppearanceSettings.timezone;
+
     settings.value = {
       ...defaultAppearanceSettings,
-      ...parsed,
+      ...(parsed as Partial<AppearanceSettings>),
+      language: normalizedLanguage === 'en-US' ? 'en-US' : 'zh-CN',
+      timezone: normalizedTimezone,
     };
   } catch {
     settings.value = { ...defaultAppearanceSettings };

@@ -229,6 +229,10 @@ export async function fetchSocialBootstrapMine(limit = 20) {
   return request<BootstrapPayload>(`/api/v1/social/bootstrap?limit=${limit}&mine=1`);
 }
 
+export async function fetchUser(userId: string) {
+  return request<SocialUser>(`/api/v1/social/users/${userId}`);
+}
+
 export async function createMediaAsset(payload: CreateMediaRequest) {
   return request<MediaAsset>('/api/v1/social/media', {
     method: 'POST',

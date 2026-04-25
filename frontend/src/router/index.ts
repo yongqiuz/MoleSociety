@@ -4,10 +4,12 @@ import LoginPage from '../pages/LoginPage.vue';
 import LogoutPage from '../pages/LogoutPage.vue';
 import SettingsPage from '../pages/SettingsPage.vue';
 import ProfileEditPage from '../pages/ProfileEditPage.vue';
+import UserProfilePage from '../pages/UserProfilePage.vue';
 import NotFoundPage from '../pages/NotFoundPage.vue';
 import AppearanceSettings from '../components/settings/AppearanceSettings.vue';
 import AccountSettings from '../components/settings/AccountSettings.vue';
-import PlaceholderSettings from '../components/settings/PlaceholderSettings.vue';
+import NotificationSettings from '../components/settings/NotificationSettings.vue';
+import PrivacySettings from '../components/settings/PrivacySettings.vue';
 import { useAuth } from '../composables/useAuth';
 
 const router = createRouter({
@@ -41,6 +43,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/profile/:id',
+      name: 'profile-view',
+      component: UserProfilePage,
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: SettingsPage,
@@ -55,12 +63,12 @@ const router = createRouter({
         {
           path: 'notifications',
           name: 'settings-notifications',
-          component: PlaceholderSettings,
+          component: NotificationSettings,
         },
         {
           path: 'privacy',
           name: 'settings-privacy',
-          component: PlaceholderSettings,
+          component: PrivacySettings,
         },
         {
           path: 'account',

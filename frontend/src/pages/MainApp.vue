@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import 'emoji-picker-element';
 import {
   createConversation,
   createConversationMessage,
@@ -30,7 +31,7 @@ import {
   ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
   Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3
 } from 'lucide-vue-next';
-import { useAppearance, type AppearanceSettings, type ColorScheme } from '../composables/useAppearance';
+import { useAppearance } from '../composables/useAppearance';
 
 type Section =
   | 'home'
@@ -168,9 +169,11 @@ const instances = ref<FederationInstance[]>([]);
 const postDraft = ref('');
 const showPollEditor = ref(false);
 const showTagPicker = ref(false);
+const showEmojiPicker = ref(false);
 const selectedPostTags = ref<string[]>([]);
 const customTagInput = ref('');
 const defaultTagOptions = ['创作者动态', '联邦社交', '产品更新', '技术分享', '问答', '公告'];
+const recentPostTags = ref<string[]>([]);
 const pollOptions = ref(['', '']);
 const pollExpiresIn = ref(1440); // 1 day
 const pollMultiple = ref(false);
@@ -198,12 +201,22 @@ const threadAncestors = ref<FeedCard[]>([]);
 const threadReplies = ref<FeedCard[]>([]);
 const activeReplyTarget = ref<FeedCard | null>(null);
 const replyTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const postComposerRef = ref<HTMLTextAreaElement | null>(null);
+const emojiPickerPanelRef = ref<HTMLElement | null>(null);
+const emojiTriggerRef = ref<HTMLElement | null>(null);
+const postSelectionStart = ref(0);
+const postSelectionEnd = ref(0);
 const router = useRouter();
 const { session: authSession } = useAuth();
 
+const MAX_POST_LENGTH = 500;
+const MAX_POST_TAGS = 5;
+const MAX_TAG_LENGTH = 24;
+const RECENT_TAGS_STORAGE_KEY = 'mole-compose-recent-tags';
+
 const isLoggedIn = computed(() => !!authSession.value);
 
-const { themeStyles } = useAppearance();
+const { themeStyles, appearanceSettings } = useAppearance();
 
 const activeExploreTab = ref<ExploreTab>('posts');
 
@@ -226,8 +239,6 @@ const interaction = ref('anyone');
 const showVisibilityModal = ref(false);
 const tempVisibility = ref('public');
 const tempInteraction = ref('anyone');
-const showVisibilityDropdown = ref(false);
-const showInteractionDropdown = ref(false);
 
 const visibilityOptions = [
   { id: 'public', label: '公开', description: '所有人可见', icon: Globe },
@@ -249,6 +260,15 @@ const selectedVisibilityItem = computed(() =>
 const selectedInteractionItem = computed(() => 
   interactionOptions.find(opt => opt.id === interaction.value) || interactionOptions[0]
 );
+
+const interactionSummary = computed(() => {
+  if (interaction.value === 'anyone') return '允许引用';
+  if (interaction.value === 'followers') return '关注者可引用';
+  return '禁止引用';
+});
+
+const remainingPostChars = computed(() => MAX_POST_LENGTH - postDraft.value.length);
+const isPostOverLimit = computed(() => remainingPostChars.value < 0);
 
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === selectedConversationId.value),
@@ -354,7 +374,7 @@ const trendingTags = computed(() => {
 });
 
 const availablePostTags = computed(() => {
-  const pool = [...defaultTagOptions, ...trendingTags.value.map((item) => item.tag)];
+  const pool = [...defaultTagOptions, ...recentPostTags.value, ...trendingTags.value.map((item) => item.tag)];
   return [...new Set(pool.map((tag) => tag.trim()).filter(Boolean))];
 });
 
@@ -494,12 +514,25 @@ function formatTimestamp(input: string) {
   if (!input) return '刚刚';
   const date = new Date(input);
   if (Number.isNaN(date.getTime())) return input;
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const locale = appearanceSettings.value.language || 'zh-CN';
+  const timezone = appearanceSettings.value.timezone || 'UTC';
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone,
+    }).format(date);
+  } catch {
+    return date.toLocaleString(locale, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
 }
 
 function formatBytes(bytes: number) {
@@ -797,6 +830,10 @@ function openVisibilityModal() {
   showVisibilityModal.value = true;
 }
 
+function closeVisibilityModal() {
+  showVisibilityModal.value = false;
+}
+
 function saveVisibilitySettings() {
   visibility.value = tempVisibility.value;
   interaction.value = tempInteraction.value;
@@ -982,12 +1019,17 @@ function toggleFollow(userId: string) {
   };
 }
 
+function goToUserProfile(userId: string) {
+  if (!userId) return;
+  void router.push(`/profile/${userId}`);
+}
+
 function togglePollEditor() {
   showPollEditor.value = !showPollEditor.value;
 }
 
 function normalizeTag(raw: string) {
-  return raw.replace(/^#/, '').trim().replace(/\s+/g, '');
+  return raw.replace(/^#/, '').trim().replace(/\s+/g, '').slice(0, MAX_TAG_LENGTH);
 }
 
 function toggleTagPicker() {
@@ -1003,6 +1045,7 @@ function togglePostTag(tag: string) {
     return;
   }
 
+  if (selectedPostTags.value.length >= MAX_POST_TAGS) return;
   selectedPostTags.value = [...selectedPostTags.value, normalized];
 }
 
@@ -1013,12 +1056,90 @@ function addCustomTag() {
     customTagInput.value = '';
     return;
   }
+  if (selectedPostTags.value.length >= MAX_POST_TAGS) return;
   selectedPostTags.value = [...selectedPostTags.value, normalized];
   customTagInput.value = '';
 }
 
 function removePostTag(tag: string) {
   selectedPostTags.value = selectedPostTags.value.filter((item) => item !== tag);
+}
+
+function loadRecentPostTags() {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(RECENT_TAGS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return;
+    recentPostTags.value = parsed
+      .map((tag) => normalizeTag(String(tag ?? '')))
+      .filter(Boolean)
+      .slice(0, 10);
+  } catch {
+    recentPostTags.value = [];
+  }
+}
+
+function persistRecentPostTags() {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(RECENT_TAGS_STORAGE_KEY, JSON.stringify(recentPostTags.value));
+}
+
+function updateRecentTags(tags: string[]) {
+  const normalized = tags.map((tag) => normalizeTag(tag)).filter(Boolean);
+  const merged = [...normalized, ...recentPostTags.value];
+  recentPostTags.value = [...new Set(merged)].slice(0, 10);
+  persistRecentPostTags();
+}
+
+function syncPostCursor(event?: Event) {
+  const target = (event?.target as HTMLTextAreaElement | undefined) ?? postComposerRef.value;
+  if (!target) return;
+  postSelectionStart.value = target.selectionStart ?? postDraft.value.length;
+  postSelectionEnd.value = target.selectionEnd ?? postDraft.value.length;
+}
+
+function toggleEmojiPicker() {
+  showEmojiPicker.value = !showEmojiPicker.value;
+  if (showEmojiPicker.value) {
+    syncPostCursor();
+  }
+}
+
+async function insertEmojiAtCursor(emoji: string) {
+  if (!emoji) return;
+
+  const start = postSelectionStart.value;
+  const end = postSelectionEnd.value;
+  postDraft.value = `${postDraft.value.slice(0, start)}${emoji}${postDraft.value.slice(end)}`;
+
+  const nextPos = start + emoji.length;
+  postSelectionStart.value = nextPos;
+  postSelectionEnd.value = nextPos;
+
+  await nextTick();
+  if (postComposerRef.value) {
+    postComposerRef.value.focus();
+    postComposerRef.value.setSelectionRange(nextPos, nextPos);
+  }
+}
+
+async function handleEmojiPick(event: Event) {
+  const detail = (event as Event & { detail?: { unicode?: string; emoji?: { unicode?: string } | string } }).detail;
+  const unicode = detail?.unicode || (typeof detail?.emoji === 'string' ? detail.emoji : detail?.emoji?.unicode) || '';
+  if (!unicode) return;
+  await insertEmojiAtCursor(unicode);
+  showEmojiPicker.value = false;
+}
+
+function handleDocumentClick(event: MouseEvent) {
+  if (!showEmojiPicker.value) return;
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (emojiPickerPanelRef.value?.contains(target)) return;
+  if (emojiTriggerRef.value?.contains(target)) return;
+  showEmojiPicker.value = false;
 }
 
 function addPollOption() {
@@ -1034,7 +1155,7 @@ function removePollOption(index: number) {
 }
 
 async function publishPost() {
-  if ((!postDraft.value.trim() && !mediaPreview.value) || !currentUser.value || saving.value) return;
+  if ((!postDraft.value.trim() && !mediaPreview.value) || !currentUser.value || saving.value || isPostOverLimit.value) return;
 
   saving.value = true;
   try {
@@ -1080,9 +1201,11 @@ async function publishPost() {
     postDraft.value = '';
     mediaPreview.value = null;
     mediaMeta.value = null;
+    updateRecentTags(selectedPostTags.value);
     selectedPostTags.value = [];
     customTagInput.value = '';
     showTagPicker.value = false;
+    showEmojiPicker.value = false;
   } catch (error) {
     if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
       void router.push({ path: '/login', query: { redirect: '/app' } });
@@ -1145,7 +1268,15 @@ async function sendMessage() {
   }
 }
 
-onMounted(loadBootstrap);
+onMounted(() => {
+  void loadBootstrap();
+  loadRecentPostTags();
+  document.addEventListener('click', handleDocumentClick);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleDocumentClick);
+});
 </script>
 
 <template>
@@ -1204,13 +1335,17 @@ onMounted(loadBootstrap);
                   title="控制可见性和互动权限"
                 >
                   <component :is="selectedVisibilityItem.icon" class="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
-                  <span>{{ selectedVisibilityItem.label }}，{{ interaction === 'everyone' ? '允许引用' : interaction === 'followers' ? '关注者可引用' : '禁止引用' }}</span>
+                  <span>{{ selectedVisibilityItem.label }}，{{ interactionSummary }}</span>
                   <ChevronDown class="w-4 h-4 opacity-50 ml-1" />
                 </button>
               </div>
 
               <textarea
+                ref="postComposerRef"
                 v-model="postDraft"
+                @click="syncPostCursor"
+                @keyup="syncPostCursor"
+                @select="syncPostCursor"
                 placeholder="想写什么？"
                 class="min-h-[100px] w-full resize-none bg-transparent text-base leading-relaxed text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
               />
@@ -1292,19 +1427,24 @@ onMounted(loadBootstrap);
                     >
                       <Hash class="w-5 h-5 cursor-pointer transition-transform hover:scale-110" :class="showTagPicker ? 'text-cyan-400' : 'hover:text-cyan-400'" />
                     </button>
-                    <button class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" title="表情">
+                    <button ref="emojiTriggerRef" @click.stop="toggleEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
                       <Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" />
                     </button>
                   </div>
                   <span
                     class="text-sm font-medium pr-1 transition-colors"
-                    :class="500 - postDraft.length <= 0 ? 'text-rose-400 font-bold' : 500 - postDraft.length <= 50 ? 'text-amber-400' : 'text-[color:var(--text-muted)]'"
-                  >{{ 500 - postDraft.length }}</span>
+                    :class="remainingPostChars <= 0 ? 'text-rose-400 font-bold' : remainingPostChars <= 50 ? 'text-amber-400' : 'text-[color:var(--text-muted)]'"
+                  >{{ remainingPostChars }}</span>
+                </div>
+
+                <div v-if="showEmojiPicker" ref="emojiPickerPanelRef" @click.stop class="rounded-2xl border border-yellow-400/20 bg-[var(--panel-bg)] p-2">
+                  <emoji-picker @emoji-click="handleEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
+                  <div class="mt-2 px-2 text-[11px] text-[color:var(--text-muted)]">点击表情即可插入</div>
                 </div>
 
                 <Transition name="expand">
                   <div v-if="showTagPicker" class="rounded-2xl border border-cyan-500/25 bg-cyan-500/5 p-4">
-                    <div class="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">选择标签（点击 #XXX）</div>
+                    <div class="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">选择标签（点击 #XXX，最多 5 个）</div>
                     <div class="flex flex-wrap gap-2">
                       <button
                         v-for="tag in availablePostTags"
@@ -1347,7 +1487,7 @@ onMounted(loadBootstrap);
                 </div>
 
                 <button
-                  :disabled="saving"
+                  :disabled="saving || isPostOverLimit"
                   @click="publishPost"
                   class="w-full rounded-xl bg-emerald-600 py-2.5 text-[15px] font-bold tracking-wider text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:opacity-50 disabled:hover:translate-y-0"
                 >
@@ -2053,6 +2193,12 @@ onMounted(loadBootstrap);
                     </div>
                     <div class="flex shrink-0 items-center gap-2">
                       <button
+                        @click="goToUserProfile(person.id)"
+                        class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-semibold text-[color:var(--text-secondary)] transition hover:border-cyan-500/40 hover:bg-cyan-500/10 hover:text-cyan-300"
+                      >
+                        查看主页
+                      </button>
+                      <button
                         @click="startConversation(person)"
                         class="inline-flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/8 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-500/12 hover:text-emerald-200"
                       >
@@ -2469,6 +2615,85 @@ onMounted(loadBootstrap);
           </div>
         </aside>
       </div>
+
+      <Transition name="modal">
+        <div
+          v-if="showVisibilityModal"
+          class="fixed inset-0 z-[220] flex items-center justify-center bg-black/45 px-4"
+          @click="closeVisibilityModal"
+        >
+          <div
+            class="relative w-full max-w-xl rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.45)]"
+            @click.stop
+          >
+            <div class="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-lg font-semibold text-[color:var(--text-primary)]">发布范围与引用权限</h3>
+                <p class="mt-1 text-sm text-[color:var(--text-muted)]">选择这条内容谁可以看到，以及谁可以引用。</p>
+              </div>
+              <button
+                @click="closeVisibilityModal"
+                class="rounded-lg p-1.5 text-[color:var(--text-muted)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                title="关闭"
+              >
+                <X class="h-4 w-4" />
+              </button>
+            </div>
+
+            <div class="space-y-6">
+              <div>
+                <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">可见性</div>
+                <div class="space-y-2">
+                  <button
+                    v-for="option in visibilityOptions"
+                    :key="option.id"
+                    @click="tempVisibility = option.id"
+                    class="flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition"
+                    :class="tempVisibility === option.id ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-[color:var(--border-color)] hover:border-emerald-500/30 hover:bg-[var(--panel-soft)]'"
+                  >
+                    <component :is="option.icon" class="h-4 w-4 text-emerald-400" />
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-[color:var(--text-primary)]">{{ option.label }}</div>
+                      <div class="text-xs text-[color:var(--text-muted)]">{{ option.description }}</div>
+                    </div>
+                    <div class="h-3 w-3 rounded-full border border-emerald-400/70" :class="tempVisibility === option.id ? 'bg-emerald-400' : 'bg-transparent'" />
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">引用权限</div>
+                <div class="grid gap-2 sm:grid-cols-3">
+                  <button
+                    v-for="option in interactionOptions"
+                    :key="option.id"
+                    @click="tempInteraction = option.id"
+                    class="rounded-xl border px-3 py-2.5 text-sm font-medium transition"
+                    :class="tempInteraction === option.id ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-cyan-500/40'"
+                  >
+                    {{ option.label }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-6 flex items-center justify-end gap-3">
+              <button
+                @click="closeVisibilityModal"
+                class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-medium text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)]"
+              >
+                取消
+              </button>
+              <button
+                @click="saveVisibilitySettings"
+                class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </div>
   </div>
 </template>
