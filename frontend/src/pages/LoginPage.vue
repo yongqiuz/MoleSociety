@@ -3,7 +3,8 @@ import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuth } from '../composables/useAuth';
 import { ApiError } from '../api/authApi';
-import { Mail, Lock, Eye, EyeOff, Wallet, ArrowRight, Hexagon, Sparkles, User, UserPlus } from 'lucide-vue-next';
+import { Mail, Lock, Eye, EyeOff, Wallet, ArrowRight, Sparkles, User, UserPlus } from 'lucide-vue-next';
+import brandLogo from '../logo.png';
 
 const router = useRouter();
 const route = useRoute();
@@ -185,9 +186,7 @@ async function signInWithWallet() {
     <!-- Header -->
     <header class="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-10">
       <div class="flex items-center gap-3">
-        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-teal-600 text-white shadow-lg shadow-emerald-500/20">
-          <Hexagon class="w-6 h-6 fill-emerald-100 text-emerald-100" />
-        </div>
+        <img :src="brandLogo" alt="MoleSociety logo" class="h-10 w-10 rounded-xl object-cover shadow-lg shadow-emerald-500/20" />
         <span class="text-xl font-bold tracking-tight text-white drop-shadow-sm">MoleSociety</span>
       </div>
     </header>
