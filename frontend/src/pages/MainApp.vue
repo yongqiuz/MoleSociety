@@ -26,7 +26,7 @@ import type { Component } from 'vue';
 import {
   Home, Compass, Bell, List, Hash, Star, Bookmark, AtSign, Settings,
   MoreHorizontal, User, Shield, PenTool, Mail, AlignJustify, Users,
-  Filter, Trash2, Image as ImageIcon, CheckSquare, AlertTriangle, Smile, Search,
+  Filter, Trash2, Image as ImageIcon, CheckSquare, Smile, Search,
   ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
   Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3
 } from 'lucide-vue-next';
@@ -167,6 +167,10 @@ const conversations = ref<ConversationCard[]>([]);
 const instances = ref<FederationInstance[]>([]);
 const postDraft = ref('');
 const showPollEditor = ref(false);
+const showTagPicker = ref(false);
+const selectedPostTags = ref<string[]>([]);
+const customTagInput = ref('');
+const defaultTagOptions = ['创作者动态', '联邦社交', '产品更新', '技术分享', '问答', '公告'];
 const pollOptions = ref(['', '']);
 const pollExpiresIn = ref(1440); // 1 day
 const pollMultiple = ref(false);
@@ -347,6 +351,11 @@ const trendingTags = computed(() => {
     .sort((left, right) => right[1] - left[1])
     .slice(0, 6)
     .map(([tag, count]) => ({ tag, count }));
+});
+
+const availablePostTags = computed(() => {
+  const pool = [...defaultTagOptions, ...trendingTags.value.map((item) => item.tag)];
+  return [...new Set(pool.map((tag) => tag.trim()).filter(Boolean))];
 });
 
 const serviceNotice = computed(() =>
@@ -977,6 +986,41 @@ function togglePollEditor() {
   showPollEditor.value = !showPollEditor.value;
 }
 
+function normalizeTag(raw: string) {
+  return raw.replace(/^#/, '').trim().replace(/\s+/g, '');
+}
+
+function toggleTagPicker() {
+  showTagPicker.value = !showTagPicker.value;
+}
+
+function togglePostTag(tag: string) {
+  const normalized = normalizeTag(tag);
+  if (!normalized) return;
+
+  if (selectedPostTags.value.includes(normalized)) {
+    selectedPostTags.value = selectedPostTags.value.filter((item) => item !== normalized);
+    return;
+  }
+
+  selectedPostTags.value = [...selectedPostTags.value, normalized];
+}
+
+function addCustomTag() {
+  const normalized = normalizeTag(customTagInput.value);
+  if (!normalized) return;
+  if (selectedPostTags.value.includes(normalized)) {
+    customTagInput.value = '';
+    return;
+  }
+  selectedPostTags.value = [...selectedPostTags.value, normalized];
+  customTagInput.value = '';
+}
+
+function removePostTag(tag: string) {
+  selectedPostTags.value = selectedPostTags.value.filter((item) => item !== tag);
+}
+
 function addPollOption() {
   if (pollOptions.value.length < 4) {
     pollOptions.value.push('');
@@ -1023,7 +1067,7 @@ async function publishPost() {
       interaction: interaction.value,
       storageUri: createdAsset?.storageUri || `draft://post/${Date.now()}`,
       attestationUri: `attestation://frontend/${Date.now()}`,
-      tags: ['创作者动态', '联邦社交'],
+      tags: selectedPostTags.value,
       mediaIds: createdAsset ? [createdAsset.id] : [],
       type: 'post',
       pollOptions: showPollEditor.value ? pollOptions.value.filter(o => o.trim()) : [],
@@ -1036,6 +1080,9 @@ async function publishPost() {
     postDraft.value = '';
     mediaPreview.value = null;
     mediaMeta.value = null;
+    selectedPostTags.value = [];
+    customTagInput.value = '';
+    showTagPicker.value = false;
   } catch (error) {
     if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
       void router.push({ path: '/login', query: { redirect: '/app' } });
@@ -1237,8 +1284,13 @@ onMounted(loadBootstrap);
                     <button @click="togglePollEditor" class="rounded-lg p-1.5 transition-colors" :class="showPollEditor ? 'text-emerald-400 bg-emerald-500/10' : 'hover:bg-[var(--chip-bg)]'">
                       <BarChart3 class="w-5 h-5 hover:text-emerald-400 cursor-pointer transition-transform hover:scale-110" />
                     </button>
-                    <button class="rounded-lg p-1.5 transition-colors hover:bg-amber-500/10" title="预警标签">
-                      <AlertTriangle class="w-5 h-5 hover:text-amber-400 cursor-pointer transition-transform hover:scale-110" />
+                    <button
+                      @click="toggleTagPicker"
+                      class="rounded-lg p-1.5 transition-colors"
+                      :class="showTagPicker ? 'text-cyan-400 bg-cyan-500/10' : 'hover:bg-cyan-500/10'"
+                      title="选择标签"
+                    >
+                      <Hash class="w-5 h-5 cursor-pointer transition-transform hover:scale-110" :class="showTagPicker ? 'text-cyan-400' : 'hover:text-cyan-400'" />
                     </button>
                     <button class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" title="表情">
                       <Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" />
@@ -1248,6 +1300,50 @@ onMounted(loadBootstrap);
                     class="text-sm font-medium pr-1 transition-colors"
                     :class="500 - postDraft.length <= 0 ? 'text-rose-400 font-bold' : 500 - postDraft.length <= 50 ? 'text-amber-400' : 'text-[color:var(--text-muted)]'"
                   >{{ 500 - postDraft.length }}</span>
+                </div>
+
+                <Transition name="expand">
+                  <div v-if="showTagPicker" class="rounded-2xl border border-cyan-500/25 bg-cyan-500/5 p-4">
+                    <div class="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">选择标签（点击 #XXX）</div>
+                    <div class="flex flex-wrap gap-2">
+                      <button
+                        v-for="tag in availablePostTags"
+                        :key="tag"
+                        @click="togglePostTag(tag)"
+                        class="rounded-full border px-3 py-1 text-xs font-semibold transition"
+                        :class="selectedPostTags.includes(tag) ? 'border-cyan-400/60 bg-cyan-500/20 text-cyan-300' : 'border-[color:var(--border-color)] bg-[var(--panel-bg)] text-[color:var(--text-secondary)] hover:border-cyan-400/50 hover:text-cyan-300'"
+                      >
+                        #{{ tag }}
+                      </button>
+                    </div>
+                    <div class="mt-3 flex gap-2">
+                      <input
+                        v-model="customTagInput"
+                        @keydown.enter.prevent="addCustomTag"
+                        placeholder="输入自定义标签，例如 #开发日志"
+                        class="flex-1 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-cyan-400"
+                      />
+                      <button
+                        @click="addCustomTag"
+                        class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500"
+                      >
+                        添加
+                      </button>
+                    </div>
+                  </div>
+                </Transition>
+
+                <div v-if="selectedPostTags.length > 0" class="flex flex-wrap gap-2">
+                  <button
+                    v-for="tag in selectedPostTags"
+                    :key="tag"
+                    @click="removePostTag(tag)"
+                    class="inline-flex items-center gap-1 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
+                    title="点击移除标签"
+                  >
+                    <span>#{{ tag }}</span>
+                    <X class="h-3.5 w-3.5" />
+                  </button>
                 </div>
 
                 <button
@@ -2315,8 +2411,8 @@ onMounted(loadBootstrap);
         <aside class="border-t border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-24px)] lg:overflow-y-auto no-scrollbar lg:border-l lg:border-t-0">
           <div class="p-4">
             <div class="mb-5 flex items-center gap-2">
-              <div class="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm shadow-emerald-500/20">w</div>
-              <div class="text-[17px] font-bold tracking-tight text-[color:var(--text-primary)]">Mole</div>
+              <img src="/logo.png" alt="MoleSociety logo" class="h-8 w-8 rounded-xl object-cover shadow-sm shadow-emerald-500/20" />
+              <div class="text-[17px] font-bold tracking-tight text-[color:var(--text-primary)]">MoleSociety</div>
             </div>
 
             <div class="space-y-0.5">
