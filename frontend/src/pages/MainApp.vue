@@ -197,6 +197,12 @@ const showInstanceDropdown = ref(false);
 const selectedPostId = ref('');
 const threadLoading = ref(false);
 const threadError = ref('');
+const mainContentRef = ref<HTMLElement | null>(null);
+const isPullingHome = ref(false);
+const isRefreshingHome = ref(false);
+const pullDistance = ref(0);
+const pullStartY = ref(0);
+const pullEligible = ref(false);
 const threadFocusPost = ref<FeedCard | null>(null);
 const threadAncestors = ref<FeedCard[]>([]);
 const threadReplies = ref<FeedCard[]>([]);
@@ -214,6 +220,8 @@ const MAX_POST_LENGTH = 500;
 const MAX_POST_TAGS = 5;
 const MAX_TAG_LENGTH = 24;
 const RECENT_TAGS_STORAGE_KEY = 'mole-compose-recent-tags';
+const PULL_MAX_DISTANCE = 120;
+const PULL_REFRESH_THRESHOLD = 72;
 
 const isLoggedIn = computed(() => !!authSession.value);
 
@@ -270,6 +278,10 @@ const interactionSummary = computed(() => {
 
 const remainingPostChars = computed(() => MAX_POST_LENGTH - postDraft.value.length);
 const isPostOverLimit = computed(() => remainingPostChars.value < 0);
+const pullRefreshHint = computed(() => {
+  if (isRefreshingHome.value) return '刷新中...';
+  return pullDistance.value >= PULL_REFRESH_THRESHOLD ? '松开刷新' : '下拉刷新';
+});
 
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === selectedConversationId.value),
@@ -868,6 +880,85 @@ async function loadBootstrap() {
     goToNotFound();
   } finally {
     loading.value = false;
+  }
+}
+
+function isHomeTopReached() {
+  if (currentSection.value !== 'home') return false;
+  const el = mainContentRef.value;
+  if (el && el.scrollHeight > el.clientHeight) {
+    return el.scrollTop <= 0;
+  }
+  if (typeof window !== 'undefined') {
+    return window.scrollY <= 0;
+  }
+  return true;
+}
+
+function resetPullRefreshState() {
+  isPullingHome.value = false;
+  pullEligible.value = false;
+  pullDistance.value = 0;
+}
+
+function onHomeTouchStart(event: TouchEvent) {
+  if (currentSection.value !== 'home' || isRefreshingHome.value) return;
+  if (!isHomeTopReached()) return;
+  const touch = event.touches[0];
+  if (!touch) return;
+  pullStartY.value = touch.clientY;
+  pullDistance.value = 0;
+  pullEligible.value = true;
+  isPullingHome.value = true;
+}
+
+function onHomeTouchMove(event: TouchEvent) {
+  if (!isPullingHome.value || !pullEligible.value || isRefreshingHome.value) return;
+  const touch = event.touches[0];
+  if (!touch) return;
+  const delta = touch.clientY - pullStartY.value;
+  if (delta <= 0) {
+    pullDistance.value = 0;
+    return;
+  }
+  pullDistance.value = Math.min(PULL_MAX_DISTANCE, delta * 0.45);
+}
+
+function onHomeTouchEnd() {
+  if (!isPullingHome.value) return;
+  const shouldRefresh = pullDistance.value >= PULL_REFRESH_THRESHOLD && pullEligible.value;
+  resetPullRefreshState();
+  if (shouldRefresh) {
+    void refreshHomeTimeline();
+  }
+}
+
+async function refreshHomeTimeline() {
+  if (isRefreshingHome.value || saving.value) return;
+
+  isRefreshingHome.value = true;
+  try {
+    if (!apiOnline.value) {
+      goToNotFound();
+      return;
+    }
+    const [payload, minePayload] = await Promise.all([
+      fetchSocialBootstrap(),
+      authSession.value ? fetchSocialBootstrapMine() : Promise.resolve(null),
+    ]);
+    applyBootstrap(payload);
+    myPosts.value = minePayload ? minePayload.feed.map(toFeedCard) : [];
+    errorMessage.value = '';
+    apiOnline.value = true;
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '刷新失败，请稍后再试。';
+  } finally {
+    isRefreshingHome.value = false;
+    pullDistance.value = 0;
   }
 }
 
@@ -1555,7 +1646,23 @@ onBeforeUnmount(() => {
           </div>
         </aside>
 
-        <main class="relative z-0 bg-[var(--frame-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar">
+        <main
+          ref="mainContentRef"
+          class="relative z-0 bg-[var(--frame-bg)] lg:h-[calc(100vh-32px)] lg:overflow-y-auto no-scrollbar"
+          @touchstart="onHomeTouchStart"
+          @touchmove="onHomeTouchMove"
+          @touchend="onHomeTouchEnd"
+          @touchcancel="onHomeTouchEnd"
+        >
+          <div
+            v-if="currentSection === 'home'"
+            class="overflow-hidden transition-[height] duration-200"
+            :style="{ height: `${isRefreshingHome ? 56 : pullDistance}px` }"
+          >
+            <div class="flex h-14 items-center justify-center text-sm text-[color:var(--text-muted)]">
+              {{ pullRefreshHint }}
+            </div>
+          </div>
           <div class="border-b border-[color:var(--border-color)] px-6 py-6 transition-all duration-300">
             <div class="flex items-center gap-4 text-2xl font-bold text-[color:var(--text-primary)]">
               <component :is="currentSectionInfo.icon" class="w-7 h-7 text-emerald-500" />
