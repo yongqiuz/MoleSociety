@@ -11,6 +11,8 @@ import {
   fetchPostThread,
   fetchSocialBootstrap,
   fetchSocialBootstrapMine,
+  getConversation,
+  listConversations,
   updateUserProfile,
   voteOnPoll,
   type BootstrapPayload,
@@ -184,6 +186,7 @@ const selectedConversationId = ref('');
 const mediaPreview = ref<string | null>(null);
 const mediaMeta = ref<{ name: string; sizeLabel: string; type: string; sizeBytes: number } | null>(null);
 const replyDraft = ref('');
+const messageListRef = ref<HTMLElement | null>(null);
 const loading = ref(true);
 const saving = ref(false);
 const apiOnline = ref(false);
@@ -702,6 +705,57 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
   };
 }
 
+function upsertConversation(conversation: ConversationCard) {
+  const remaining = conversations.value.filter((item) => item.id !== conversation.id);
+  conversations.value = [conversation, ...remaining];
+}
+
+async function scrollMessagesToBottom() {
+  await nextTick();
+  if (!messageListRef.value) return;
+  messageListRef.value.scrollTop = messageListRef.value.scrollHeight;
+}
+
+async function loadConversationMessages(conversationId: string) {
+  if (!currentUser.value) return;
+  if (!apiOnline.value) return;
+  try {
+    const detail = await getConversation(conversationId);
+    const mapped = toConversationCard(detail, currentUser.value.id);
+    upsertConversation(mapped);
+    selectedConversationId.value = mapped.id;
+    await scrollMessagesToBottom();
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '会话加载失败，请稍后重试。';
+  }
+}
+
+async function refreshConversations(keepSelection = true) {
+  if (!currentUser.value) return;
+  if (!apiOnline.value) return;
+  try {
+    const items = await listConversations(50);
+    const mapped = items.map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null));
+    conversations.value = mapped;
+    if (!keepSelection || !selectedConversationId.value) {
+      selectedConversationId.value = conversations.value[0]?.id ?? '';
+    } else if (!conversations.value.find((item) => item.id === selectedConversationId.value)) {
+      selectedConversationId.value = conversations.value[0]?.id ?? '';
+    }
+  } catch (error) {
+    errorMessage.value = '会话列表刷新失败，请稍后再试。';
+  }
+}
+
+async function openConversation(conversationId: string) {
+  selectedConversationId.value = conversationId;
+  await loadConversationMessages(conversationId);
+}
+
 function findDirectConversationWith(userId: string) {
   return conversations.value.find((conversation) => conversation.participantId === userId);
 }
@@ -735,12 +789,13 @@ async function startConversation(targetUser: SocialUser) {
     });
 
     const mappedConversation = toConversationCard(createdConversation, currentUser.value.id);
-    conversations.value = [mappedConversation, ...conversations.value.filter((item) => item.id !== mappedConversation.id)];
+    upsertConversation(mappedConversation);
     selectedConversationId.value = mappedConversation.id;
 
     currentSection.value = 'messages';
     messageDraft.value = '';
     errorMessage.value = '';
+    await scrollMessagesToBottom();
   } catch (error) {
     if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
       void router.push({ path: '/login', query: { redirect: '/app' } });
@@ -760,14 +815,7 @@ function applyBootstrap(payload: BootstrapPayload) {
   const mappedConversations = payload.conversations.map((conversation) =>
     toConversationCard(conversation, currentUser.value?.id ?? null),
   );
-  const dedupedConversations = mappedConversations.filter(
-    (conversation, index, list) =>
-      index ===
-      list.findIndex(
-        (item) => item.id === conversation.id || (!!item.participantId && item.participantId === conversation.participantId),
-      ),
-  );
-  conversations.value = dedupedConversations;
+  conversations.value = mappedConversations;
   instances.value = payload.instances;
   selectedConversationId.value = conversations.value[0]?.id ?? '';
 }
@@ -1333,14 +1381,13 @@ async function sendMessage() {
       body: messageDraft.value.trim(),
     });
 
-    conversations.value = conversations.value.map((conversation) =>
-      conversation.id === updatedConversation.id
-        ? toConversationCard(updatedConversation, currentUser.value?.id ?? null)
-        : conversation,
-    );
+    const mapped = toConversationCard(updatedConversation, currentUser.value?.id ?? null);
+    upsertConversation(mapped);
+    selectedConversationId.value = mapped.id;
 
     messageDraft.value = '';
     errorMessage.value = '';
+    await scrollMessagesToBottom();
   } catch (error) {
     if (error instanceof ApiError) {
       if (error.code === 'AUTH_SESSION_REQUIRED') {
@@ -1375,6 +1422,17 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
 });
+
+watch(
+  () => currentSection.value,
+  (section) => {
+    if (section !== 'messages') return;
+    void refreshConversations(true);
+    if (selectedConversationId.value) {
+      void loadConversationMessages(selectedConversationId.value);
+    }
+  },
+);
 </script>
 
 <template>
@@ -2519,7 +2577,7 @@ onBeforeUnmount(() => {
                   <button
                     v-for="conversation in conversations"
                     :key="conversation.id"
-                    @click="selectedConversationId = conversation.id"
+                    @click="openConversation(conversation.id)"
                     class="flex w-full items-start gap-3 px-5 py-4 text-left transition hover:bg-[var(--chip-hover)]"
                     :class="selectedConversationId === conversation.id ? 'bg-emerald-500/10' : ''"
                   >
@@ -2559,7 +2617,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
 
-                  <div class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+                  <div ref="messageListRef" class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
                     <div class="space-y-4">
                       <div
                         v-for="message in activeConversation.messages"
@@ -2604,6 +2662,7 @@ onBeforeUnmount(() => {
                       <div class="min-w-0 flex-1 rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-4 py-3">
                         <textarea
                           v-model="messageDraft"
+                          @keydown.enter.prevent="sendMessage"
                           rows="3"
                           maxlength="1000"
                           placeholder="输入消息..."
