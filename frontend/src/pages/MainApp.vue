@@ -31,7 +31,7 @@ import {
   MoreHorizontal, User, Shield, PenTool, Mail, AlignJustify, Users,
   Filter, Trash2, Image as ImageIcon, CheckSquare, Smile, Search,
   ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
-  Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3
+  Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3, RefreshCw
 } from 'lucide-vue-next';
 import { useAppearance } from '../composables/useAppearance';
 
@@ -1722,9 +1722,20 @@ watch(
             </div>
           </div>
           <div class="border-b border-[color:var(--border-color)] px-6 py-6 transition-all duration-300">
-            <div class="flex items-center gap-4 text-2xl font-bold text-[color:var(--text-primary)]">
-              <component :is="currentSectionInfo.icon" class="w-7 h-7 text-emerald-500" />
-              <span>{{ currentSectionInfo.label }}</span>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex items-center gap-4 text-2xl font-bold text-[color:var(--text-primary)]">
+                <component :is="currentSectionInfo.icon" class="w-7 h-7 text-emerald-500" />
+                <span>{{ currentSectionInfo.label }}</span>
+              </div>
+              <button
+                v-if="currentSection === 'home'"
+                :disabled="isRefreshingHome"
+                @click="refreshHomeTimeline"
+                class="inline-flex items-center gap-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-2 text-sm font-medium text-[color:var(--text-secondary)] transition hover:border-emerald-500/40 hover:text-emerald-500 disabled:opacity-50"
+              >
+                <RefreshCw class="h-4 w-4" :class="isRefreshingHome ? 'animate-spin' : ''" />
+                <span>{{ isRefreshingHome ? '刷新中' : '刷新' }}</span>
+              </button>
             </div>
           </div>
 

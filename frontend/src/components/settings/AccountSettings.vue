@@ -20,6 +20,7 @@ const notice = ref('');
 const displayName = ref('');
 const bio = ref('');
 const avatarUrl = ref('');
+const backgroundUrl = ref('');
 const fields = ref<UserField[]>([]);
 const featuredTags = ref<string[]>([]);
 const isBot = ref(false);
@@ -31,6 +32,7 @@ onMounted(() => {
     displayName.value = currentUser.value.displayName || '';
     bio.value = currentUser.value.bio || '';
     avatarUrl.value = currentUser.value.avatarUrl || '';
+    backgroundUrl.value = currentUser.value.backgroundUrl || '';
     fields.value = currentUser.value.fields ? [...currentUser.value.fields] : [];
     featuredTags.value = currentUser.value.featuredTags ? [...currentUser.value.featuredTags] : [];
     isBot.value = currentUser.value.isBot || false;
@@ -42,6 +44,7 @@ const hasChanges = computed(() => {
   return displayName.value !== (currentUser.value.displayName || '') ||
          bio.value !== (currentUser.value.bio || '') ||
          avatarUrl.value !== (currentUser.value.avatarUrl || '') ||
+         backgroundUrl.value !== (currentUser.value.backgroundUrl || '') ||
          JSON.stringify(fields.value) !== JSON.stringify(currentUser.value.fields || []) ||
          JSON.stringify(featuredTags.value) !== JSON.stringify(currentUser.value.featuredTags || []) ||
          isBot.value !== (currentUser.value.isBot || false);
@@ -59,6 +62,7 @@ async function handleSave() {
       displayName: displayName.value,
       bio: bio.value,
       avatarUrl: avatarUrl.value,
+      backgroundUrl: backgroundUrl.value,
       fields: fields.value,
       featuredTags: featuredTags.value,
       isBot: isBot.value,
@@ -117,8 +121,20 @@ const avatarText = (name: string) => name ? name.charAt(0).toUpperCase() : 'U';
       </div>
     </div>
 
-    <!-- Avatar Section -->
+    <!-- Profile Header + Avatar Section -->
     <section class="mb-10 rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-8">
+      <div class="mb-5 h-24 w-full overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40">
+        <img v-if="backgroundUrl" :src="backgroundUrl" class="h-full w-full object-cover" />
+      </div>
+      <label class="mb-5 block">
+        <div class="mb-2 text-xs font-bold text-[color:var(--text-primary)]">背景图 URL</div>
+        <input
+          v-model="backgroundUrl"
+          type="text"
+          placeholder="https://example.com/background.jpg"
+          class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500"
+        />
+      </label>
       <div class="flex items-center gap-8">
         <div class="relative">
           <div class="flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-3xl font-bold text-slate-900 shadow-sm overflow-hidden">
@@ -138,6 +154,15 @@ const avatarText = (name: string) => name ? name.charAt(0).toUpperCase() : 'U';
           <p class="mt-1 text-sm text-[color:var(--text-muted)]">建议使用正方形图片 400x400px。</p>
         </div>
       </div>
+      <label class="mt-5 block max-w-md">
+        <div class="mb-2 text-xs font-bold text-[color:var(--text-primary)]">头像 URL</div>
+        <input
+          v-model="avatarUrl"
+          type="text"
+          placeholder="https://example.com/avatar.png"
+          class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500"
+        />
+      </label>
     </section>
 
     <!-- Form Sections -->
