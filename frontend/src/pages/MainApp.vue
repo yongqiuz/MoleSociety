@@ -2384,10 +2384,11 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div class="flex gap-3">
                 <button
                   @click="goToUserProfile(post.authorId)"
-                  class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+                  class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
                   title="查看用户主页"
                 >
-                  {{ avatarText(post.author) }}
+                  <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
+                  <template v-else>{{ avatarText(post.author) }}</template>
                 </button>
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -2449,10 +2450,11 @@ watch([likedPosts, bookmarkedPosts], () => {
                   <div class="flex gap-4">
                     <button
                       @click="goToUserProfile(post.authorId)"
-                      class="h-12 w-12 flex-none rounded-2xl bg-gradient-to-br from-indigo-200 to-emerald-200 flex items-center justify-center font-bold text-slate-800"
+                      class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-200 to-emerald-200 font-bold text-slate-800"
                       title="查看用户主页"
                     >
-                      {{ avatarText(post.author) }}
+                      <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
+                      <template v-else>{{ avatarText(post.author) }}</template>
                     </button>
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between gap-2">

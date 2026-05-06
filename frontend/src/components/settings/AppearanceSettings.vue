@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useAppearance, type ColorScheme } from '../../composables/useAppearance';
 
-const { appearanceSettings, saveAppearanceSettings } = useAppearance();
+const { appearanceSettings, saveAppearanceSettings, setColorSchemePreview, clearColorSchemePreview } = useAppearance();
 
 const appearanceDraft = ref({ ...appearanceSettings.value });
 const settingsNotice = ref('');
@@ -26,11 +26,24 @@ const hasAppearanceChanges = computed(() => JSON.stringify(appearanceDraft.value
 
 function handleSave() {
   saveAppearanceSettings(appearanceDraft.value);
+  clearColorSchemePreview();
   settingsNotice.value = '设置已保存';
   setTimeout(() => {
     settingsNotice.value = '';
   }, 3000);
 }
+
+watch(
+  () => appearanceDraft.value.colorScheme,
+  (next) => {
+    setColorSchemePreview(next);
+  },
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  clearColorSchemePreview();
+});
 </script>
 
 <template>

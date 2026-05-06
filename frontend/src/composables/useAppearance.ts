@@ -34,6 +34,7 @@ const defaultAppearanceSettings: AppearanceSettings = {
 
 const settings = ref<AppearanceSettings>({ ...defaultAppearanceSettings });
 const systemPrefersDark = ref(false);
+const previewColorScheme = ref<ColorScheme | null>(null);
 
 let initialized = false;
 let mediaQueryList: MediaQueryList | null = null;
@@ -95,10 +96,11 @@ function ensureInitialized() {
 }
 
 const resolvedTheme = computed<'light' | 'dark'>(() => {
-  if (settings.value.colorScheme === 'auto') {
+  const effectiveScheme = previewColorScheme.value ?? settings.value.colorScheme;
+  if (effectiveScheme === 'auto') {
     return systemPrefersDark.value ? 'dark' : 'light';
   }
-  return settings.value.colorScheme;
+  return effectiveScheme;
 });
 
 watch(
@@ -120,6 +122,14 @@ watch(
 
 function saveAppearanceSettings(next: AppearanceSettings) {
   settings.value = { ...next };
+}
+
+function setColorSchemePreview(next: ColorScheme) {
+  previewColorScheme.value = next;
+}
+
+function clearColorSchemePreview() {
+  previewColorScheme.value = null;
 }
 
 const themeStyles = computed<Record<string, string>>(() => {
@@ -166,6 +176,8 @@ export function useAppearance() {
     defaultAppearanceSettings,
     resolvedTheme,
     saveAppearanceSettings,
+    setColorSchemePreview,
+    clearColorSchemePreview,
     themeStyles,
   };
 }
