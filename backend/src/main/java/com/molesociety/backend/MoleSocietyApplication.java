@@ -197,6 +197,16 @@ class AuthController {
     }
   }
 
+  @PostMapping("/change-password")
+  ResponseEntity<ApiResponse<Map<String, Boolean>>> changePassword(@RequestBody ChangePasswordRequest req, HttpServletRequest request) {
+    try {
+      auth.changePassword(request, req.currentPassword, req.newPassword);
+      return ApiResponse.ok(Map.of("updated", true));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
   @GetMapping("/me")
   ResponseEntity<ApiResponse<AuthSessionResponse>> me(HttpServletRequest request, HttpServletResponse response) {
     try {
@@ -1473,6 +1483,32 @@ class AuthService {
     }
     SocialUser user = social.getUser(account.userId);
     return new AuthResult(user, createSession(user.id, account.wallet));
+  }
+
+  synchronized void changePassword(HttpServletRequest request, String currentPassword, String newPassword) {
+    if (!Strings.hasText(currentPassword) || !Strings.hasText(newPassword)) {
+      throw ApiException.badRequest("AUTH_MISSING_PASSWORD_FIELDS", "validation", "currentPassword and newPassword are required");
+    }
+    if (newPassword.length() < 6) {
+      throw ApiException.badRequest("AUTH_WEAK_PASSWORD", "validation", "password must be at least 6 characters");
+    }
+
+    SocialUser user = userFromRequest(request).orElseThrow(() -> ApiException.unauthorized("AUTH_SESSION_REQUIRED", "session", "authentication required"));
+    Account account = accounts.values().stream()
+        .filter(a -> user.id.equals(a.userId))
+        .findFirst()
+        .orElseThrow(() -> ApiException.notFound("AUTH_ACCOUNT_NOT_FOUND", "credentials", "account not found"));
+
+    if (!encoder.matches(currentPassword, account.passwordHash)) {
+      throw ApiException.unauthorized("AUTH_INVALID_PASSWORD", "credentials", "invalid password");
+    }
+    if (encoder.matches(newPassword, account.passwordHash)) {
+      throw ApiException.badRequest("AUTH_PASSWORD_UNCHANGED", "validation", "new password must be different from current password");
+    }
+
+    account.passwordHash = encoder.encode(newPassword);
+    account.updatedAt = Instant.now().toString();
+    persistence.saveAuthAccount(account);
   }
 
   synchronized AuthResult register(RegisterRequest req, String uri) {
@@ -2807,6 +2843,11 @@ class RegisterRequest {
   public long chainId;
   public String signature;
   public String nonce;
+}
+
+class ChangePasswordRequest {
+  public String currentPassword;
+  public String newPassword;
 }
 
 class BindChallengeRequest {

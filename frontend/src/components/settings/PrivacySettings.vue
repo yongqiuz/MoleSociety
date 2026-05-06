@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { ApiError, changePassword } from '../../api/authApi';
 
 type PrivacySettings = {
   profileDiscoverable: boolean;
@@ -24,6 +25,14 @@ const defaultSettings: PrivacySettings = {
 const draft = ref<PrivacySettings>({ ...defaultSettings });
 const saved = ref<PrivacySettings>({ ...defaultSettings });
 const notice = ref('');
+const changingPassword = ref(false);
+const passwordNotice = ref('');
+const passwordError = ref('');
+const passwordForm = ref({
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+});
 
 function loadSettings() {
   if (typeof window === 'undefined') return;
@@ -54,6 +63,59 @@ function saveSettings() {
 const hasChanges = computed(() => JSON.stringify(draft.value) !== JSON.stringify(saved.value));
 
 loadSettings();
+
+async function submitChangePassword() {
+  passwordNotice.value = '';
+  passwordError.value = '';
+
+  const currentPassword = passwordForm.value.currentPassword.trim();
+  const newPassword = passwordForm.value.newPassword.trim();
+  const confirmPassword = passwordForm.value.confirmPassword.trim();
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    passwordError.value = '请填写完整密码信息';
+    return;
+  }
+  if (newPassword.length < 6) {
+    passwordError.value = '新密码至少需要 6 位';
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    passwordError.value = '两次输入的新密码不一致';
+    return;
+  }
+  if (currentPassword === newPassword) {
+    passwordError.value = '新密码不能与旧密码相同';
+    return;
+  }
+
+  changingPassword.value = true;
+  try {
+    await changePassword(currentPassword, newPassword);
+    passwordForm.value = {
+      currentPassword: '',
+      newPassword: '',
+      confirmPassword: '',
+    };
+    passwordNotice.value = '密码修改成功';
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.code === 'AUTH_INVALID_PASSWORD') {
+        passwordError.value = '当前密码不正确';
+      } else if (err.code === 'AUTH_WEAK_PASSWORD') {
+        passwordError.value = '新密码至少需要 6 位';
+      } else if (err.code === 'AUTH_SESSION_REQUIRED') {
+        passwordError.value = '登录状态失效，请重新登录';
+      } else {
+        passwordError.value = err.message || '修改密码失败，请稍后重试';
+      }
+    } else {
+      passwordError.value = '修改密码失败，请稍后重试';
+    }
+  } finally {
+    changingPassword.value = false;
+  }
+}
 </script>
 
 <template>
@@ -160,6 +222,47 @@ loadSettings();
             禁止
           </button>
         </div>
+      </div>
+
+      <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-5">
+        <div class="text-base font-semibold text-[color:var(--text-primary)]">修改密码</div>
+        <div class="mt-1 text-sm text-[color:var(--text-muted)]">输入当前密码并设置新密码，至少 6 位。</div>
+        <form class="mt-4 grid gap-3 sm:grid-cols-2" @submit.prevent="submitChangePassword">
+          <input
+            v-model="passwordForm.currentPassword"
+            type="password"
+            autocomplete="current-password"
+            placeholder="当前密码"
+            class="rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500/60 sm:col-span-2"
+          />
+          <input
+            v-model="passwordForm.newPassword"
+            type="password"
+            autocomplete="new-password"
+            placeholder="新密码"
+            class="rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500/60"
+          />
+          <input
+            v-model="passwordForm.confirmPassword"
+            type="password"
+            autocomplete="new-password"
+            placeholder="确认新密码"
+            class="rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500/60"
+          />
+          <div class="sm:col-span-2 flex items-center justify-between gap-4">
+            <div>
+              <div v-if="passwordNotice" class="text-sm text-emerald-500">{{ passwordNotice }}</div>
+              <div v-if="passwordError" class="text-sm text-rose-400">{{ passwordError }}</div>
+            </div>
+            <button
+              type="submit"
+              :disabled="changingPassword"
+              class="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {{ changingPassword ? '提交中...' : '更新密码' }}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   </div>

@@ -133,6 +133,13 @@ export async function registerAccount(payload: {
   });
 }
 
+export async function changePassword(currentPassword: string, newPassword: string) {
+  return request<{ updated: boolean }>('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
 export async function fetchBindChallenge(walletAddress: string, chainId: number) {
   return request<ChallengeResponse>('/auth/bind-challenge', {
     method: 'POST',
