@@ -41,7 +41,7 @@ services:
       DATABASE_URL: postgres://molesociety:${POSTGRES_PASSWORD}@postgres:5432/molesociety_dev?sslmode=disable
       REDIS_ADDR: redis:6379
       DB_MIGRATIONS_DIR: ./migrations
-      SOCIAL_SEED: "1"
+      SOCIAL_SEED: "0"
       COOKIE_SECURE: "true"
       COOKIE_SAMESITE: "None"
     ports:

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import 'emoji-picker-element';
 import {
   createConversation,
@@ -34,6 +34,7 @@ import {
   Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3, RefreshCw
 } from 'lucide-vue-next';
 import { useAppearance } from '../composables/useAppearance';
+import PostFeedCard from '../components/posts/PostFeedCard.vue';
 
 type Section =
   | 'home'
@@ -229,6 +230,8 @@ const emojiPickerPanelRef = ref<HTMLElement | null>(null);
 const emojiTriggerRef = ref<HTMLElement | null>(null);
 const postSelectionStart = ref(0);
 const postSelectionEnd = ref(0);
+const processingMessageIntent = ref(false);
+const route = useRoute();
 const router = useRouter();
 const { session: authSession } = useAuth();
 
@@ -1043,6 +1046,25 @@ async function loadBootstrap() {
   }
 }
 
+async function handleRouteMessageIntent() {
+  if (processingMessageIntent.value) return;
+  const targetUserId = typeof route.query.messageUser === 'string' ? route.query.messageUser.trim() : '';
+  if (!targetUserId || !currentUser.value) return;
+  const targetUser = people.value.find((person) => person.id === targetUserId);
+  if (!targetUser || targetUser.id === currentUser.value.id) {
+    await router.replace('/app');
+    return;
+  }
+
+  processingMessageIntent.value = true;
+  try {
+    await startConversation(targetUser);
+  } finally {
+    await router.replace('/app');
+    processingMessageIntent.value = false;
+  }
+}
+
 function isHomeTopReached() {
   if (currentSection.value !== 'home') return false;
   const el = mainContentRef.value;
@@ -1279,7 +1301,10 @@ function toggleFollow(userId: string) {
 
 function goToUserProfile(userId: string) {
   if (!userId) return;
-  void router.push(`/profile/${userId}`);
+  const matched = (currentUser.value?.id === userId ? currentUser.value : null)
+    || people.value.find((person) => person.id === userId);
+  const handle = String(matched?.handle || '').replace(/^@/, '').trim();
+  void router.push(`/profile/${encodeURIComponent(handle || userId)}`);
 }
 
 function togglePollEditor() {
@@ -1567,7 +1592,10 @@ async function forwardPostToConversation() {
 }
 
 onMounted(() => {
-  void loadBootstrap();
+  void (async () => {
+    await loadBootstrap();
+    await handleRouteMessageIntent();
+  })();
   loadRecentPostTags();
   loadInteractionState();
   document.addEventListener('click', handleDocumentClick);
@@ -2380,40 +2408,26 @@ watch([likedPosts, bookmarkedPosts], () => {
             <article v-if="myTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
               你发布的摩文会显示在这里。
             </article>
-            <article v-for="post in myTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
-              <div class="flex gap-3">
-                <button
-                  @click="goToUserProfile(post.authorId)"
-                  class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
-                  title="查看用户主页"
-                >
-                  <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
-                  <template v-else>{{ avatarText(post.author) }}</template>
-                </button>
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <button
-                      @click="goToUserProfile(post.authorId)"
-                      class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
-                    >
-                      {{ post.author }}
-                    </button>
-                    <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
-                    <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
-                  </div>
-                  <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
-                  <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
-                  <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
-                  </div>
-                  <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
-                    <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
-                      #{{ tag }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </article>
+            <PostFeedCard
+              v-for="post in myTimeline"
+              v-else
+              :key="post.id"
+              :post="post"
+              :avatar-url="userAvatarUrl(post.authorId)"
+              :liked="likedPosts[post.id]"
+              :bookmarked="bookmarkedPosts[post.id]"
+              :current-user-id="currentUser?.id"
+              :show-more-menu="true"
+              :more-menu-open="activeMoreMenuId === post.id"
+              @open-profile="goToUserProfile"
+              @open-detail="openPostDetail"
+              @forward="openForwardDialog"
+              @toggle-like="toggleLike"
+              @toggle-bookmark="toggleBookmark"
+              @toggle-more="toggleMoreMenu"
+              @menu-action="handleMenuAction"
+              @vote="handleVote"
+            />
           </section>
 
           <section v-else-if="currentSection === 'explore'">
@@ -2445,129 +2459,25 @@ watch([likedPosts, bookmarkedPosts], () => {
             <div class="divide-y divide-[color:var(--border-color)]">
               <!-- Posts Tab -->
               <template v-if="activeExploreTab === 'posts'">
-                <article v-for="post in timeline" :key="post.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
-                  <!-- Reuse Post View Here - Similar to Home Feed -->
-                  <div class="flex gap-4">
-                    <button
-                      @click="goToUserProfile(post.authorId)"
-                      class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-200 to-emerald-200 font-bold text-slate-800"
-                      title="查看用户主页"
-                    >
-                      <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
-                      <template v-else>{{ avatarText(post.author) }}</template>
-                    </button>
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-center justify-between gap-2">
-                        <div class="flex items-center gap-2 truncate">
-                          <button
-                            @click="goToUserProfile(post.authorId)"
-                            class="font-bold text-[color:var(--text-primary)] transition hover:text-emerald-500"
-                          >
-                            {{ post.author }}
-                          </button>
-                          <span class="text-sm text-[color:var(--text-muted)] truncate">@{{ post.instance }}</span>
-                        </div>
-                        <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
-                      </div>
-                      <div class="mt-2 text-[17px] leading-relaxed text-[color:var(--text-primary)] whitespace-pre-wrap">{{ post.content }}</div>
-
-                      <!-- Explore Poll Display -->
-                      <div v-if="post.poll" class="mt-4 space-y-3 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
-                        <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
-                          <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
-                            <div 
-                              class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all"
-                              :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
-                            ></div>
-                            <div class="relative flex items-center justify-between px-3 py-2 text-sm">
-                              <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
-                              <span class="font-bold text-emerald-400">
-                                {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
-                              </span>
-                            </div>
-                          </div>
-                          <button 
-                            v-else 
-                            @click="handleVote(post, [idx])"
-                            class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-left text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/10"
-                          >
-                            {{ opt.label }}
-                          </button>
-                        </div>
-                      </div>
-                      
-                      <!-- Post Media (Explore Tab) -->
-                      <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
-                      </div>
-                      
-                      <!-- Interaction Row -->
-                      <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
-                        <button
-                          @click="openPostDetail(post.id)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
-                        >
-                          <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
-                        </button>
-                        <button
-                          @click="openForwardDialog(post)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
-                        >
-                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> 转发
-                        </button>
-                        <button
-                          @click="toggleLike(post.id)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-rose-500/10 hover:text-rose-400"
-                          :class="likedPosts[post.id] ? 'text-rose-400' : 'text-[color:var(--text-secondary)]'"
-                        >
-                          <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
-                        </button>
-                        <button
-                          @click="toggleBookmark(post.id)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-indigo-500/10 hover:text-indigo-400"
-                          :class="bookmarkedPosts[post.id] ? 'text-indigo-400' : 'text-[color:var(--text-secondary)]'"
-                        >
-                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
-                        </button>
-                        
-                        <!-- More Menu Wrapper -->
-                        <div class="relative ml-auto">
-                          <button 
-                            @click="toggleMoreMenu(post.id)"
-                            class="inline-flex items-center rounded-lg px-2 py-1.5 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
-                          >
-                            <MoreHorizontal class="w-5 h-5" />
-                          </button>
-                          
-                          <!-- Dropdown Menu -->
-                          <div 
-                            v-if="activeMoreMenuId === post.id" 
-                            class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
-                          >
-                            <div class="py-1">
-                              <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
-                              <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
-                              <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
-                              <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
-                            </div>
-                            <div class="border-t border-[color:var(--border-color)] py-1">
-                              <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
-                            </div>
-                            <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
-                              <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏 {{ post.handle }}</button>
-                              <button @click="handleMenuAction('block', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">屏蔽 {{ post.handle }}</button>
-                              <button @click="handleMenuAction('report', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">举报 {{ post.handle }}</button>
-                            </div>
-                            <div class="border-t border-[color:var(--border-color)] py-1">
-                              <button @click="handleMenuAction('blockInstance', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 text-rose-500 font-medium">屏蔽 {{ post.instance }} 实例</button>
-                            </div>
-                          </div>
-                        </div>
-
-                      </div>
-                    </div>
-                  </div>
-                </article>
+                <PostFeedCard
+                  v-for="post in timeline"
+                  :key="post.id"
+                  :post="post"
+                  :avatar-url="userAvatarUrl(post.authorId)"
+                  :liked="likedPosts[post.id]"
+                  :bookmarked="bookmarkedPosts[post.id]"
+                  :current-user-id="currentUser?.id"
+                  :show-more-menu="true"
+                  :more-menu-open="activeMoreMenuId === post.id"
+                  @open-profile="goToUserProfile"
+                  @open-detail="openPostDetail"
+                  @forward="openForwardDialog"
+                  @toggle-like="toggleLike"
+                  @toggle-bookmark="toggleBookmark"
+                  @toggle-more="toggleMoreMenu"
+                  @menu-action="handleMenuAction"
+                  @vote="handleVote"
+                />
               </template>
 
               <!-- Topics Tab -->
@@ -2942,20 +2852,52 @@ watch([likedPosts, bookmarkedPosts], () => {
             <article v-if="likedTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
               你点赞的内容会显示在这里。
             </article>
-            <article v-for="post in likedTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
-              <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</div>
-              <div class="mt-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
-            </article>
+            <PostFeedCard
+              v-for="post in likedTimeline"
+              v-else
+              :key="post.id"
+              :post="post"
+              :avatar-url="userAvatarUrl(post.authorId)"
+              :liked="likedPosts[post.id]"
+              :bookmarked="bookmarkedPosts[post.id]"
+              :current-user-id="currentUser?.id"
+              :show-more-menu="true"
+              :more-menu-open="activeMoreMenuId === post.id"
+              @open-profile="goToUserProfile"
+              @open-detail="openPostDetail"
+              @forward="openForwardDialog"
+              @toggle-like="toggleLike"
+              @toggle-bookmark="toggleBookmark"
+              @toggle-more="toggleMoreMenu"
+              @menu-action="handleMenuAction"
+              @vote="handleVote"
+            />
           </section>
 
           <section v-else-if="currentSection === 'bookmarks'" class="divide-y divide-[color:var(--border-color)]">
             <article v-if="bookmarkedTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
               收藏的动态会整理在这里，方便稍后继续阅读。
             </article>
-            <article v-for="post in bookmarkedTimeline" v-else :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
-              <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ post.author }}</div>
-              <div class="mt-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
-            </article>
+            <PostFeedCard
+              v-for="post in bookmarkedTimeline"
+              v-else
+              :key="post.id"
+              :post="post"
+              :avatar-url="userAvatarUrl(post.authorId)"
+              :liked="likedPosts[post.id]"
+              :bookmarked="bookmarkedPosts[post.id]"
+              :current-user-id="currentUser?.id"
+              :show-more-menu="true"
+              :more-menu-open="activeMoreMenuId === post.id"
+              @open-profile="goToUserProfile"
+              @open-detail="openPostDetail"
+              @forward="openForwardDialog"
+              @toggle-like="toggleLike"
+              @toggle-bookmark="toggleBookmark"
+              @toggle-more="toggleMoreMenu"
+              @menu-action="handleMenuAction"
+              @vote="handleVote"
+            />
           </section>
 
           <section v-else-if="currentSection === 'mentions'" class="divide-y divide-[color:var(--border-color)]">

@@ -16,8 +16,8 @@ const error = ref('');
 const user = ref<SocialUser | null>(null);
 const posts = ref<SocialPost[]>([]);
 
-const targetId = computed(() => String(route.params.id || '').trim());
-const isSelfProfile = computed(() => currentUser.value?.id === targetId.value);
+const targetKey = computed(() => decodeURIComponent(String(route.params.id || '').trim()));
+const isSelfProfile = computed(() => currentUser.value?.id === user.value?.id);
 
 function avatarText(name: string) {
   return name?.slice(0, 1).toUpperCase() || 'U';
@@ -52,8 +52,8 @@ function formatTimestamp(input: string) {
 }
 
 async function loadProfile() {
-  const id = targetId.value;
-  if (!id) {
+  const key = targetKey.value;
+  if (!key) {
     error.value = '用户不存在';
     loading.value = false;
     return;
@@ -62,12 +62,21 @@ async function loadProfile() {
   loading.value = true;
   error.value = '';
   try {
-    const [profile, bootstrap] = await Promise.all([
-      fetchUser(id),
-      fetchSocialBootstrap(80),
-    ]);
+    const bootstrap = await fetchSocialBootstrap(80);
+    const normalizedKey = key.replace(/^@/, '');
+    const matchedUser = bootstrap.users.find((item) => {
+      if (item.id === normalizedKey) return true;
+      const handle = String(item.handle || '').replace(/^@/, '');
+      return handle === normalizedKey;
+    });
+    const targetUserId = matchedUser?.id || normalizedKey;
+    const profile = await fetchUser(targetUserId);
     user.value = profile;
-    posts.value = bootstrap.feed.filter((post) => post.authorId === id);
+    posts.value = bootstrap.feed.filter((post) => post.authorId === profile.id);
+    const canonicalHandle = String(profile.handle || '').replace(/^@/, '');
+    if (canonicalHandle && normalizedKey !== canonicalHandle) {
+      void router.replace(`/profile/${encodeURIComponent(canonicalHandle)}`);
+    }
   } catch {
     error.value = '加载主页失败，请稍后重试';
   } finally {
@@ -81,6 +90,11 @@ function goBack() {
 
 function goEditProfile() {
   void router.push('/profile/edit');
+}
+
+function goStartConversation() {
+  if (!user.value?.id || isSelfProfile.value) return;
+  void router.push({ path: '/app', query: { messageUser: user.value.id } });
 }
 
 onMounted(() => {
@@ -138,6 +152,13 @@ watch(
               >
                 编辑资料
               </button>
+              <button
+                v-else
+                @click="goStartConversation"
+                class="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
+              >
+                发消息
+              </button>
             </div>
 
             <p class="mt-4 whitespace-pre-wrap text-sm leading-7 text-[color:var(--text-secondary)]">{{ user.bio || '这个用户还没有填写简介。' }}</p>
@@ -158,6 +179,16 @@ watch(
           <article v-for="post in posts" :key="post.id" class="border-b border-[color:var(--border-color)] px-6 py-5 last:border-b-0">
             <div class="text-xs text-[color:var(--text-muted)]">{{ formatTimestamp(post.createdAt) }}</div>
             <div class="mt-2 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
+            <div
+              v-if="Array.isArray(post.media) && post.media.length > 0"
+              class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]"
+            >
+              <img
+                :src="post.media[0].url"
+                :alt="post.media[0].name || '帖子图片'"
+                class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]"
+              />
+            </div>
             <div v-if="post.tags.length" class="mt-3 flex flex-wrap gap-2">
               <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
                 #{{ tag }}

@@ -571,11 +571,10 @@ class PersistenceService {
   boolean loadSocialState(SocialService social) {
     if (databaseAvailable) {
       SocialState state = loadSocialFromPostgres();
-      if (!state.users.isEmpty() || !state.posts.isEmpty() || !state.instances.isEmpty()) {
-        social.replaceState(state);
-        saveSocialSnapshot(state);
-        return true;
-      }
+      // When DB is available, treat it as source of truth even if currently empty.
+      social.replaceState(state);
+      saveSocialSnapshot(state);
+      return true;
     }
     Optional<SocialState> redisState = loadSocialSnapshot();
     redisState.ifPresent(social::replaceState);
@@ -2045,14 +2044,20 @@ class SocialService {
     return enrichConversation(conversation);
   }
 
-  synchronized Conversation getConversation(String id) {
-    return conversations.stream().filter(c -> c.id.equals(id)).findFirst().map(this::enrichConversation)
+  private Conversation requireConversation(String id) {
+    return conversations.stream()
+        .filter(c -> c.id.equals(id))
+        .findFirst()
         .orElseThrow(() -> ApiException.notFound("SOCIAL_CONVERSATION_NOT_FOUND", "not_found", "conversation not found: " + id));
+  }
+
+  synchronized Conversation getConversation(String id) {
+    return enrichConversation(requireConversation(id));
   }
 
   synchronized Conversation addMessage(String conversationID, CreateMessageRequest req) {
     SocialUser sender = getUser(req.senderId);
-    Conversation conversation = getConversation(conversationID);
+    Conversation conversation = requireConversation(conversationID);
     if (!conversation.participantIds.contains(sender.id)) {
       throw ApiException.badRequest("SOCIAL_NOT_PARTICIPANT", "validation", "sender is not a participant in this conversation");
     }
