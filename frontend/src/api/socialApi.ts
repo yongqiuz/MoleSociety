@@ -1,4 +1,5 @@
 import { ApiError, type ApiEnvelope } from './apiError';
+import { env } from '../env';
 
 export type UserField = {
   name: string;
@@ -198,7 +199,7 @@ export type UpdateUserRequest = {
   isBot?: boolean;
 };
 
-const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || '').replace(/\/$/, '');
+const API_BASE = (env === 'dev' ? '/api-dev' : '/api-prod').replace(/\/$/, '');
 console.log('[API] social base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

@@ -1,6 +1,7 @@
-﻿import { BrowserProvider } from 'ethers';
+import { BrowserProvider } from 'ethers';
 import type { UserField } from './socialApi';
 import { ApiError, type ApiEnvelope } from './apiError';
+import { env } from '../env';
 
 export type AuthSession = {
   id: string;
@@ -26,7 +27,7 @@ type ChallengeResponse = {
   expiresAt: string;
 };
 
-const API_BASE = (import.meta.env.VITE_SOCIAL_API_URL || '').replace(/\/$/, '');
+const API_BASE = (env === 'dev' ? '/api-dev' : '/api-prod').replace(/\/$/, '');
 console.log('[API] auth base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -154,3 +155,4 @@ export async function connectWalletForRegistration() {
     signature,
   };
 }
+
