@@ -1508,7 +1508,7 @@ class AuthService {
       persistence.deleteChallenge(req.nonce);
     }
 
-    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", "摩尔1号", wallet, "", ""));
+    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", social.primaryMoleInstanceName(), wallet, "", ""));
     Account account = new Account();
     account.id = "acc_" + System.nanoTime();
     account.username = username;
@@ -1774,7 +1774,7 @@ class SocialService {
     user.handle = normalizeHandle(req.handle);
     user.displayName = Strings.or(req.displayName, user.handle.replaceFirst("^@", ""));
     user.bio = Strings.value(req.bio);
-    user.instance = Strings.or(req.instance, "摩尔1号");
+    user.instance = Strings.or(req.instance, primaryMoleInstanceName());
     user.wallet = Strings.value(req.wallet);
     user.avatarUrl = Strings.value(req.avatarUrl);
     user.backgroundUrl = Strings.value(req.backgroundUrl);
@@ -2186,12 +2186,13 @@ class SocialService {
 
   private void seed() {
     Instant now = Instant.now();
-    instances.add(new FederationInstance("摩尔1号", "创作者主权与链上身份", "12.4k", "43 ms", "healthy"));
+    String primary = primaryMoleInstanceName();
+    instances.add(new FederationInstance(primary, "创作者主权与链上身份", "12.4k", "43 ms", "healthy"));
     instances.add(new FederationInstance("摩尔2号", "阅读社群与数字馆藏", "8.9k", "51 ms", "healthy"));
     instances.add(new FederationInstance("摩尔3号", "跨实例消息转发", "3.1k", "37 ms", "healthy"));
     instances.add(new FederationInstance("摩尔4号", "媒体与永续资源镜像", "5.7k", "49 ms", "healthy"));
 
-    users.add(seedUser("user_archive", "@archive", "Whale Archive", "为创作者提供永久内容归档与链上身份锚定。", "摩尔1号", "0xa18f...3c92", "https://picsum.photos/seed/archive/128/128", 1284, 312, now.minus(Duration.ofHours(48))));
+    users.add(seedUser("user_archive", "@archive", "Whale Archive", "为创作者提供永久内容归档与链上身份锚定。", primary, "0xa18f...3c92", "https://picsum.photos/seed/archive/128/128", 1284, 312, now.minus(Duration.ofHours(48))));
     users.add(seedUser("user_librarian", "@librarian", "Node Librarian", "把书籍确权、媒体存储和去中心化社交连接在一起。", "摩尔2号", "0x78fe...12ab", "https://picsum.photos/seed/librarian/128/128", 932, 221, now.minus(Duration.ofHours(36))));
     users.add(seedUser("user_fedilab", "@fedilab", "Open Federation Lab", "探索 ActivityPub、实时会话和多实例协作。", "摩尔3号", "0x95bc...09ee", "https://picsum.photos/seed/fedilab/128/128", 1650, 415, now.minus(Duration.ofHours(24))));
 
@@ -2200,7 +2201,7 @@ class SocialService {
     media.add(manifest);
     media.add(space);
 
-    posts.add(seedPost("post_archive", "user_archive", "@archive", "Whale Archive", "摩尔1号", "统一 posts、replies、media 后，社交层可以直接成为出版资产的上下文索引。", "ar://post-archive", "attestation://archive/genesis", List.of("链上身份", "永久内容"), List.of(), 38, 128, now.minus(Duration.ofMinutes(130))));
+    posts.add(seedPost("post_archive", "user_archive", "@archive", "Whale Archive", primary, "统一 posts、replies、media 后，社交层可以直接成为出版资产的上下文索引。", "ar://post-archive", "attestation://archive/genesis", List.of("链上身份", "永久内容"), List.of(), 38, 128, now.minus(Duration.ofMinutes(130))));
     SocialPost librarian = seedPost("post_librarian", "user_librarian", "@librarian", "Node Librarian", "摩尔2号", "新媒体上传已同步到 Arweave 与 IPFS 双存储层。只要内容哈希一致，前端、实例、检索器都能独立重建同一份帖子上下文。", "ar://post-librarian", "storage://arweave/S1NfXo2...8vdP", List.of("Arweave", "IPFS", "永久媒体"), List.of(PostMedia.from(manifest)), 21, 64, now.minus(Duration.ofMinutes(90)));
     posts.add(librarian);
     posts.add(seedPost("post_fedilab", "user_fedilab", "@fedilab", "Open Federation Lab", "摩尔3号", "接下来要把当前的 relay server 从“扫码 mint”升级为 ActivityPub + 媒体索引 + 实时会话网关，让不同实例之间的关注、转发和聊天真正互通。", "ar://post-fedilab", "relay://federation/upgrade-plan", List.of("ActivityPub", "实时聊天", "Spring Boot"), List.of(), 55, 102, now.minus(Duration.ofMinutes(45))));
@@ -2227,8 +2228,9 @@ class SocialService {
   }
 
   private void normalizeMoleInstances() {
+    String primary = primaryMoleInstanceName();
     Map<String, String> names = new HashMap<>(Map.of(
-        "vault.social", "摩尔1号",
+        "vault.social", primary,
         "readers.polkadot", "摩尔2号",
         "relay.zone", "摩尔3号",
         "storage.zone", "摩尔4号"
@@ -2239,6 +2241,9 @@ class SocialService {
       String name = Strings.or(names.get(item.name), item.name);
       if (!Strings.hasText(name) || !name.startsWith("摩尔")) {
         name = "摩尔" + next + "号";
+      }
+      if ("摩尔1号".equals(name) || "摩尔开发1号".equals(name)) {
+        name = primary;
       }
       names.put(item.name, name);
       normalized.add(new FederationInstance(name, item.focus, item.members, item.latency, item.status));
@@ -2252,6 +2257,14 @@ class SocialService {
     for (SocialPost post : posts) {
       post.instance = Strings.or(names.get(post.instance), post.instance);
     }
+  }
+
+  String primaryMoleInstanceName() {
+    String appEnv = Env.current();
+    if ("dev".equals(appEnv) || "development".equals(appEnv)) {
+      return "摩尔开发1号";
+    }
+    return "摩尔1号";
   }
 
   private SocialUser seedUser(String id, String handle, String displayName, String bio, String instance, String wallet, String avatarUrl, int followers, int following, Instant createdAt) {

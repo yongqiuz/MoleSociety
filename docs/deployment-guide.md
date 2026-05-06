@@ -1,19 +1,20 @@
 # MoleSociety 生产部署说明
 
-本文档对应当前仓库中的 Docker 化部署文件：
+本文档对应当前仓库中的后端 Docker 化部署文件：
 
 - `docker-compose.prod.yml`
+- `docker-compose.dev.yml`
 - `backend/Dockerfile`
-- `frontend/Dockerfile`
-- `frontend/nginx.conf`
 - `.env.prod.example`
+- `.env.dev.example`
 
-默认部署形态：
+默认部署形态（Docker 仅负责后端）：
 
-- `frontend`：Nginx 托管前端静态资源，并反向代理 `/api/*` 和 `/healthz`
 - `backend`：Spring Boot
 - `postgres`：PostgreSQL 16
 - `redis`：Redis 7
+
+前端需独立部署，且通过 `frontend/src/env.js` 控制请求开发或生产后端。
 
 ## 1. 服务器准备
 
@@ -86,27 +87,49 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 ```bash
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f backend
-docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f frontend
 ```
+
+## 4.1 清理旧 Docker 配置
+
+如果你之前把前端、后端、数据库都混在一套旧容器里，先清理旧资源，再按新的 prod/dev 结构重建。
+
+只清理当前项目相关的容器、网络、旧镜像，保留数据库数据卷：
+
+```bash
+cd /opt/molesociety
+bash scripts/docker-cleanup-molesociety.sh
+```
+
+如果你连旧的 PostgreSQL / Redis 数据也要一起重置：
+
+```bash
+cd /opt/molesociety
+bash scripts/docker-cleanup-molesociety.sh --drop-data
+```
+
+说明：
+
+- 该脚本会移除旧的 `molesociety-frontend`，因为前端不再由 Docker 部署。
+- `prod` 与 `dev` 的数据库卷分离，不会再共用一份库。
+- `--drop-data` 是彻底重置，只在你确认旧库不要保留时使用。
 
 ## 5. 验证
 
 后端健康检查：
 
 ```bash
-curl http://127.0.0.1/healthz
+curl http://127.0.0.1:8080/healthz
 ```
 
-前端首页：
+## 5.1 开发环境后端容器
 
 ```bash
-curl -I http://127.0.0.1/
+cp .env.dev.example .env.dev
+docker compose --env-file .env.dev -f docker-compose.dev.yml up -d --build
+curl http://127.0.0.1:8081/healthz
 ```
 
-如果部署正常，浏览器访问：
-
-- `http://81.70.208.113`
-- 或 `https://molesociety.longyinstudio.cn`
+开发环境首次启动后，会自动使用和生产同结构的表；联邦实例首项会显示为“摩尔开发1号”，用于区分环境。
 
 ## 6. 更新发布
 

@@ -1,7 +1,7 @@
 import { BrowserProvider } from 'ethers';
 import type { UserField } from './socialApi';
 import { ApiError, type ApiEnvelope } from './apiError';
-import { env } from '../env';
+import { API_BASE } from '../config/backend';
 
 export type AuthSession = {
   id: string;
@@ -26,9 +26,6 @@ type ChallengeResponse = {
   issuedAt: string;
   expiresAt: string;
 };
-
-const API_BASE = (env === 'dev' ? '/api-dev' : '/api-prod').replace(/\/$/, '');
-console.log('[API] auth base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {

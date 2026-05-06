@@ -1,32 +1,32 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: molesociety-postgres
+    container_name: molesociety-postgres-dev
     restart: unless-stopped
     environment:
-      POSTGRES_DB: molesociety
+      POSTGRES_DB: molesociety_dev
       POSTGRES_USER: molesociety
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_dev:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U molesociety -d molesociety"]
+      test: ["CMD-SHELL", "pg_isready -U molesociety -d molesociety_dev"]
       interval: 10s
       timeout: 5s
       retries: 10
 
   redis:
     image: redis:7-alpine
-    container_name: molesociety-redis
+    container_name: molesociety-redis-dev
     restart: unless-stopped
     command: redis-server --appendonly yes
     volumes:
-      - redis_data:/data
+      - redis_data_dev:/data
 
   backend:
     build:
       context: ./backend
-    container_name: molesociety-backend
+    container_name: molesociety-backend-dev
     restart: unless-stopped
     depends_on:
       postgres:
@@ -34,17 +34,17 @@ services:
       redis:
         condition: service_started
     environment:
-      APP_ENV: production
+      APP_ENV: development
       SERVER_PORT: 8080
-      DATABASE_URL: postgres://molesociety:${POSTGRES_PASSWORD}@postgres:5432/molesociety?sslmode=disable
+      DATABASE_URL: postgres://molesociety:${POSTGRES_PASSWORD}@postgres:5432/molesociety_dev?sslmode=disable
       REDIS_ADDR: redis:6379
       DB_MIGRATIONS_DIR: ./migrations
-      SOCIAL_SEED: "0"
+      SOCIAL_SEED: "1"
       COOKIE_SECURE: "false"
       COOKIE_SAMESITE: "Lax"
     ports:
-      - "8080:8080"
+      - "8081:8080"
 
 volumes:
-  postgres_data:
-  redis_data:
+  postgres_data_dev:
+  redis_data_dev:

@@ -1,5 +1,5 @@
 import { ApiError, type ApiEnvelope } from './apiError';
-import { env } from '../env';
+import { API_BASE } from '../config/backend';
 
 export type UserField = {
   name: string;
@@ -198,9 +198,6 @@ export type UpdateUserRequest = {
   featuredTags?: string[];
   isBot?: boolean;
 };
-
-const API_BASE = (env === 'dev' ? '/api-dev' : '/api-prod').replace(/\/$/, '');
-console.log('[API] social base =', API_BASE);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method || 'GET';
