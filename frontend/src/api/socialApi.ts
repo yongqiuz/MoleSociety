@@ -222,70 +222,70 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export async function fetchSocialBootstrap(limit = 20) {
-  return request<BootstrapPayload>(`/api/v1/social/bootstrap?limit=${limit}`);
+  return request<BootstrapPayload>(`/social/bootstrap?limit=${limit}`);
 }
 
 export async function fetchSocialBootstrapMine(limit = 20) {
-  return request<BootstrapPayload>(`/api/v1/social/bootstrap?limit=${limit}&mine=1`);
+  return request<BootstrapPayload>(`/social/bootstrap?limit=${limit}&mine=1`);
 }
 
 export async function fetchUser(userId: string) {
-  return request<SocialUser>(`/api/v1/social/users/${userId}`);
+  return request<SocialUser>(`/social/users/${userId}`);
 }
 
 export async function createMediaAsset(payload: CreateMediaRequest) {
-  return request<MediaAsset>('/api/v1/social/media', {
+  return request<MediaAsset>('/social/media', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
 export async function createPost(payload: CreatePostRequest) {
-  return request<SocialPost>('/api/v1/social/posts', {
+  return request<SocialPost>('/social/posts', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
 export async function fetchPostThread(postId: string, limit = 20) {
-  return request<PostThread>(`/api/v1/social/posts/${postId}/thread?limit=${limit}`);
+  return request<PostThread>(`/social/posts/${postId}/thread?limit=${limit}`);
 }
 
 export async function fetchPostReplies(postId: string, limit = 20) {
-  return request<SocialPost[]>(`/api/v1/social/posts/${postId}/replies?limit=${limit}`);
+  return request<SocialPost[]>(`/social/posts/${postId}/replies?limit=${limit}`);
 }
 
 export async function createConversationMessage(conversationId: string, payload: CreateMessageRequest) {
-  return request<SocialConversation>(`/api/v1/social/conversations/${conversationId}/messages`, {
+  return request<SocialConversation>(`/social/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
 export async function listConversations(limit = 20) {
-  return request<SocialConversation[]>(`/api/v1/social/conversations?limit=${limit}`);
+  return request<SocialConversation[]>(`/social/conversations?limit=${limit}`);
 }
 
 export async function getConversation(conversationId: string) {
-  return request<SocialConversation>(`/api/v1/social/conversations/${conversationId}`);
+  return request<SocialConversation>(`/social/conversations/${conversationId}`);
 }
 
 export async function createConversation(payload: CreateConversationRequest) {
-  return request<SocialConversation>('/api/v1/social/conversations', {
+  return request<SocialConversation>('/social/conversations', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
 export async function updateUserProfile(userId: string, payload: UpdateUserRequest) {
-  return request<SocialUser>(`/api/v1/social/users/${userId}`, {
+  return request<SocialUser>(`/social/users/${userId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
 }
 
 export async function voteOnPoll(postId: string, optionIndices: number[]) {
-  return request<SocialPost>(`/api/v1/social/posts/${postId}/poll/vote`, {
+  return request<SocialPost>(`/social/posts/${postId}/poll/vote`, {
     method: 'POST',
     body: JSON.stringify({ optionIndices }),
   });

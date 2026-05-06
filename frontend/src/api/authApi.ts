@@ -80,11 +80,11 @@ async function connectWallet() {
 }
 
 export async function fetchCurrentSession() {
-  return request<AuthSession>('/api/v1/auth/me');
+  return request<AuthSession>('/auth/me');
 }
 
 export async function logoutSession() {
-  return request<{ loggedOut: boolean }>('/api/v1/auth/logout', {
+  return request<{ loggedOut: boolean }>('/auth/logout', {
     method: 'POST',
     body: JSON.stringify({}),
   });
@@ -93,13 +93,13 @@ export async function logoutSession() {
 export async function connectWalletAndLogin() {
   const { signer, address, chainId } = await connectWallet();
 
-  const challenge = await request<ChallengeResponse>('/api/v1/auth/challenge', {
+  const challenge = await request<ChallengeResponse>('/auth/challenge', {
     method: 'POST',
     body: JSON.stringify({ address, chainId }),
   });
 
   const signature = await signer.signMessage(challenge.message);
-  return request<AuthSession>('/api/v1/auth/verify', {
+  return request<AuthSession>('/auth/verify', {
     method: 'POST',
     body: JSON.stringify({
       address,
@@ -111,7 +111,7 @@ export async function connectWalletAndLogin() {
 
 export async function passwordLogin(identifier: string, password: string) {
   console.log('[AUTH API] passwordLogin called');
-  return request<AuthSession>('/api/v1/auth/password-login', {
+  return request<AuthSession>('/auth/password-login', {
     method: 'POST',
     body: JSON.stringify({ identifier, password }),
   });
@@ -127,14 +127,14 @@ export async function registerAccount(payload: {
   signature?: string;
   nonce?: string;
 }) {
-  return request<AuthSession>('/api/v1/auth/register', {
+  return request<AuthSession>('/auth/register', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
 export async function fetchBindChallenge(walletAddress: string, chainId: number) {
-  return request<ChallengeResponse>('/api/v1/auth/bind-challenge', {
+  return request<ChallengeResponse>('/auth/bind-challenge', {
     method: 'POST',
     body: JSON.stringify({ walletAddress, chainId }),
   });
