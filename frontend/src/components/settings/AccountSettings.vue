@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { 
   Camera, 
   Pencil, 
@@ -21,6 +21,12 @@ const displayName = ref('');
 const bio = ref('');
 const avatarUrl = ref('');
 const backgroundUrl = ref('');
+const avatarPreviewUrl = ref('');
+const backgroundPreviewUrl = ref('');
+const avatarFile = ref<File | null>(null);
+const backgroundFile = ref<File | null>(null);
+const avatarInputRef = ref<HTMLInputElement | null>(null);
+const backgroundInputRef = ref<HTMLInputElement | null>(null);
 const fields = ref<UserField[]>([]);
 const featuredTags = ref<string[]>([]);
 const isBot = ref(false);
@@ -41,6 +47,7 @@ onMounted(() => {
 
 const hasChanges = computed(() => {
   if (!currentUser.value) return false;
+  if (avatarFile.value || backgroundFile.value) return true;
   return displayName.value !== (currentUser.value.displayName || '') ||
          bio.value !== (currentUser.value.bio || '') ||
          avatarUrl.value !== (currentUser.value.avatarUrl || '') ||
@@ -58,17 +65,30 @@ async function handleSave() {
   notice.value = '';
   
   try {
+    let nextAvatarUrl = avatarUrl.value;
+    let nextBackgroundUrl = backgroundUrl.value;
+    if (avatarFile.value) {
+      nextAvatarUrl = await toDataUrl(avatarFile.value);
+    }
+    if (backgroundFile.value) {
+      nextBackgroundUrl = await toDataUrl(backgroundFile.value);
+    }
+
     const updatedUser = await updateUserProfile(currentUser.value.id, {
       displayName: displayName.value,
       bio: bio.value,
-      avatarUrl: avatarUrl.value,
-      backgroundUrl: backgroundUrl.value,
+      avatarUrl: nextAvatarUrl,
+      backgroundUrl: nextBackgroundUrl,
       fields: fields.value,
       featuredTags: featuredTags.value,
       isBot: isBot.value,
     });
     
     updateCurrentUserLocally(updatedUser);
+    avatarUrl.value = updatedUser.avatarUrl || '';
+    backgroundUrl.value = updatedUser.backgroundUrl || '';
+    clearAvatarPreview();
+    clearBackgroundPreview();
     notice.value = '个人资料已更新';
     setTimeout(() => notice.value = '', 3000);
   } catch (err: any) {
@@ -98,6 +118,86 @@ function removeTag(tag: string) {
 }
 
 const avatarText = (name: string) => name ? name.charAt(0).toUpperCase() : 'U';
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
+function toDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取图片失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function clearAvatarPreview() {
+  if (avatarPreviewUrl.value) {
+    URL.revokeObjectURL(avatarPreviewUrl.value);
+  }
+  avatarPreviewUrl.value = '';
+  avatarFile.value = null;
+}
+
+function clearBackgroundPreview() {
+  if (backgroundPreviewUrl.value) {
+    URL.revokeObjectURL(backgroundPreviewUrl.value);
+  }
+  backgroundPreviewUrl.value = '';
+  backgroundFile.value = null;
+}
+
+function validateImage(file: File) {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('请选择图片文件');
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error('图片不能超过 8MB');
+  }
+}
+
+function pickAvatar() {
+  avatarInputRef.value?.click();
+}
+
+function pickBackground() {
+  backgroundInputRef.value?.click();
+}
+
+function onAvatarFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    validateImage(file);
+    clearAvatarPreview();
+    avatarFile.value = file;
+    avatarPreviewUrl.value = URL.createObjectURL(file);
+    error.value = '';
+  } catch (err: any) {
+    error.value = err.message || '头像选择失败';
+  }
+}
+
+function onBackgroundFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    validateImage(file);
+    clearBackgroundPreview();
+    backgroundFile.value = file;
+    backgroundPreviewUrl.value = URL.createObjectURL(file);
+    error.value = '';
+  } catch (err: any) {
+    error.value = err.message || '背景图选择失败';
+  }
+}
+
+onUnmounted(() => {
+  clearAvatarPreview();
+  clearBackgroundPreview();
+});
 </script>
 
 <template>
@@ -123,46 +223,61 @@ const avatarText = (name: string) => name ? name.charAt(0).toUpperCase() : 'U';
 
     <!-- Profile Header + Avatar Section -->
     <section class="mb-10 rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-8">
-      <div class="mb-5 h-24 w-full overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40">
-        <img v-if="backgroundUrl" :src="backgroundUrl" class="h-full w-full object-cover" />
-      </div>
-      <label class="mb-5 block">
-        <div class="mb-2 text-xs font-bold text-[color:var(--text-primary)]">背景图 URL</div>
-        <input
-          v-model="backgroundUrl"
-          type="text"
-          placeholder="https://example.com/background.jpg"
-          class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500"
-        />
-      </label>
+      <button
+        type="button"
+        @click="pickBackground"
+        class="mb-5 relative block h-24 w-full overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40 text-left"
+      >
+        <img v-if="backgroundPreviewUrl || backgroundUrl" :src="backgroundPreviewUrl || backgroundUrl" class="h-full w-full object-cover" />
+        <div class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100">
+          <div class="rounded-full bg-black/40 px-3 py-1.5 text-xs font-semibold text-white">点击更换背景图</div>
+        </div>
+      </button>
+      <input
+        ref="backgroundInputRef"
+        type="file"
+        accept="image/*"
+        class="hidden"
+        @change="onBackgroundFileChange"
+      />
+      <div class="mb-5 text-xs text-[color:var(--text-muted)]">点击背景区域即可上传并预览，保存后生效。</div>
       <div class="flex items-center gap-8">
         <div class="relative">
-          <div class="flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-3xl font-bold text-slate-900 shadow-sm overflow-hidden">
-            <template v-if="avatarUrl">
-              <img :src="avatarUrl" class="h-full w-full object-cover" />
+          <button
+            type="button"
+            @click="pickAvatar"
+            class="group flex h-24 w-24 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-3xl font-bold text-slate-900 shadow-sm"
+          >
+            <template v-if="avatarPreviewUrl || avatarUrl">
+              <img :src="avatarPreviewUrl || avatarUrl" class="h-full w-full object-cover" />
             </template>
             <template v-else>
               {{ avatarText(displayName) }}
             </template>
-          </div>
-          <button class="absolute -bottom-2 -right-2 flex h-8 w-8 items-center justify-center rounded-full border-2 border-[var(--panel-soft)] bg-emerald-600 text-white shadow-md hover:bg-emerald-500 transition">
+            <span class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition group-hover:opacity-100">
+              <Camera class="h-5 w-5 text-white" />
+            </span>
+          </button>
+          <button
+            type="button"
+            @click="pickAvatar"
+            class="absolute -bottom-2 -right-2 flex h-8 w-8 items-center justify-center rounded-full border-2 border-[var(--panel-soft)] bg-emerald-600 text-white shadow-md hover:bg-emerald-500 transition"
+          >
             <Camera class="w-4 h-4" />
           </button>
+          <input
+            ref="avatarInputRef"
+            type="file"
+            accept="image/*"
+            class="hidden"
+            @change="onAvatarFileChange"
+          />
         </div>
         <div>
           <div class="text-lg font-bold text-[color:var(--text-primary)]">头像</div>
-          <p class="mt-1 text-sm text-[color:var(--text-muted)]">建议使用正方形图片 400x400px。</p>
+          <p class="mt-1 text-sm text-[color:var(--text-muted)]">点击头像即可上传并预览，建议使用正方形图片 400x400px。</p>
         </div>
       </div>
-      <label class="mt-5 block max-w-md">
-        <div class="mb-2 text-xs font-bold text-[color:var(--text-primary)]">头像 URL</div>
-        <input
-          v-model="avatarUrl"
-          type="text"
-          placeholder="https://example.com/avatar.png"
-          class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500"
-        />
-      </label>
     </section>
 
     <!-- Form Sections -->

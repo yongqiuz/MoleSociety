@@ -2226,7 +2226,6 @@ class SocialService {
     instances.add(new FederationInstance(primary, "创作者主权与链上身份", "12.4k", "43 ms", "healthy"));
     instances.add(new FederationInstance("摩尔2号", "阅读社群与数字馆藏", "8.9k", "51 ms", "healthy"));
     instances.add(new FederationInstance("摩尔3号", "跨实例消息转发", "3.1k", "37 ms", "healthy"));
-    instances.add(new FederationInstance("摩尔4号", "媒体与永续资源镜像", "5.7k", "49 ms", "healthy"));
 
     users.add(seedUser("user_archive", "@archive", "Whale Archive", "为创作者提供永久内容归档与链上身份锚定。", primary, "0xa18f...3c92", "https://picsum.photos/seed/archive/128/128", 1284, 312, now.minus(Duration.ofHours(48))));
     users.add(seedUser("user_librarian", "@librarian", "Node Librarian", "把书籍确权、媒体存储和去中心化社交连接在一起。", "摩尔2号", "0x78fe...12ab", "https://picsum.photos/seed/librarian/128/128", 932, 221, now.minus(Duration.ofHours(36))));
@@ -2268,8 +2267,7 @@ class SocialService {
     Map<String, String> names = new HashMap<>(Map.of(
         "vault.social", primary,
         "readers.polkadot", "摩尔2号",
-        "relay.zone", "摩尔3号",
-        "storage.zone", "摩尔4号"
+        "relay.zone", "摩尔3号"
     ));
     List<FederationInstance> normalized = new ArrayList<>();
     int next = 1;
@@ -2296,10 +2294,6 @@ class SocialService {
   }
 
   String primaryMoleInstanceName() {
-    String appEnv = Env.current();
-    if ("dev".equals(appEnv) || "development".equals(appEnv)) {
-      return "摩尔开发1号";
-    }
     return "摩尔1号";
   }
 

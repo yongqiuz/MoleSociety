@@ -23,6 +23,14 @@ function avatarText(name: string) {
   return name?.slice(0, 1).toUpperCase() || 'U';
 }
 
+function formatHandleInstance(handle: string, instance: string) {
+  const normalizedInstance = String(instance || '').trim();
+  if (normalizedInstance === '摩尔1号') {
+    return `@${normalizedInstance}`;
+  }
+  return `${handle}@${normalizedInstance}`;
+}
+
 function formatTimestamp(input: string) {
   if (!input) return '';
   const date = new Date(input);
@@ -120,7 +128,7 @@ watch(
                 </div>
                 <div>
                   <div class="text-2xl font-semibold text-[color:var(--text-primary)]">{{ user.displayName }}</div>
-                  <div class="text-sm text-[color:var(--text-muted)]">{{ user.handle }}@{{ user.instance }}</div>
+                  <div class="text-sm text-[color:var(--text-muted)]">{{ formatHandleInstance(user.handle, user.instance) }}</div>
                 </div>
               </div>
               <button

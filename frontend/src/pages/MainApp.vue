@@ -133,6 +133,8 @@ type ConversationCard = {
   id: string;
   name: string;
   handle: string;
+  avatarUrl?: string;
+  backgroundUrl?: string;
   status: string;
   crossInstance: boolean;
   federationRoute: string;
@@ -440,8 +442,8 @@ const notificationItems = computed(() => {
       id: `follow-${person.id}`,
       title: `${person.displayName} 开始在社区活跃`,
       body: hasPublished
-        ? `${person.handle}@${person.instance} 已发布动态，适合加入你的关注流。`
-        : `${person.handle}@${person.instance} 刚加入社区，欢迎关注。`,
+        ? `${formatHandleInstance(person.handle, person.instance)} 已发布动态，适合加入你的关注流。`
+        : `${formatHandleInstance(person.handle, person.instance)} 刚加入社区，欢迎关注。`,
       time: '刚刚',
     };
   });
@@ -650,6 +652,28 @@ function avatarText(name: string) {
   return name.slice(0, 1).toUpperCase();
 }
 
+function findPersonById(userId: string) {
+  if (!userId) return null;
+  if (currentUser.value?.id === userId) return currentUser.value;
+  return people.value.find((item) => item.id === userId) ?? null;
+}
+
+function userAvatarUrl(userId: string) {
+  return findPersonById(userId)?.avatarUrl || '';
+}
+
+function userBackgroundUrl(userId: string) {
+  return findPersonById(userId)?.backgroundUrl || '';
+}
+
+function formatHandleInstance(handle: string, instance: string) {
+  const normalizedInstance = String(instance || '').trim();
+  if (normalizedInstance === '摩尔1号') {
+    return `@${normalizedInstance}`;
+  }
+  return `${handle}@${normalizedInstance}`;
+}
+
 function profileLabel(user: SocialUser | null) {
   if (!user) return '';
   return `@${activeProfileInstanceName.value}`;
@@ -757,8 +781,8 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     '新会话';
 
   const resolvedHandle =
-    displayParticipants.map((person) => `${person.handle}@${person.instance}`).join(', ') ||
-    (fallbackPeer ? `${fallbackPeer.handle}@${fallbackPeer.instance}` : '') ||
+    displayParticipants.map((person) => formatHandleInstance(person.handle, person.instance)).join(', ') ||
+    (fallbackPeer ? formatHandleInstance(fallbackPeer.handle, fallbackPeer.instance) : '') ||
     otherParticipantIds.join(', ') ||
     participantIds.join(', ');
 
@@ -774,6 +798,8 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     txHash: conversation.txHash,
     contractAddress: conversation.contractAddress,
     explorerUrl: conversation.explorerUrl,
+    avatarUrl: fallbackPeer?.avatarUrl,
+    backgroundUrl: fallbackPeer?.backgroundUrl,
     avatarLabel: avatarText(resolvedTitle),
     participantId: fallbackPeer?.id,
     messages: conversation.messages.map((message) => ({
@@ -1596,13 +1622,17 @@ watch([likedPosts, bookmarkedPosts], () => {
               />
             </div>
 
-            <div class="flex items-center gap-3">
+            <div
+              class="flex items-center gap-3 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-3"
+              :style="currentUser?.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${currentUser.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
+            >
               <button
                 @click="currentUser?.id && goToUserProfile(currentUser.id)"
-                class="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
                 title="查看我的主页"
               >
-                {{ avatarText(currentUser?.displayName || 'W') }}
+                <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
+                <template v-else>{{ avatarText(currentUser?.displayName || 'W') }}</template>
               </button>
               <div class="min-w-0">
                 <button
@@ -1886,10 +1916,11 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div class="flex gap-3">
                 <button
                   @click="goToUserProfile(post.authorId)"
-                  class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+                  class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
                   title="查看用户主页"
                 >
-                  {{ avatarText(post.author) }}
+                  <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
+                  <template v-else>{{ avatarText(post.author) }}</template>
                 </button>
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -2069,10 +2100,11 @@ watch([likedPosts, bookmarkedPosts], () => {
                 <div class="flex gap-4">
                   <button
                     @click="goToUserProfile(threadFocusPost.authorId)"
-                    class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900"
+                    class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900"
                     title="查看用户主页"
                   >
-                    {{ avatarText(threadFocusPost.author) }}
+                    <img v-if="userAvatarUrl(threadFocusPost.authorId)" :src="userAvatarUrl(threadFocusPost.authorId)" class="h-full w-full object-cover" />
+                    <template v-else>{{ avatarText(threadFocusPost.author) }}</template>
                   </button>
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -2209,8 +2241,9 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div ref="replyComposerRef" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
                 <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-5">
                   <div class="flex items-start gap-4">
-                    <div class="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
-                      {{ avatarText(currentUser?.displayName || 'U') }}
+                    <div class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
+                      <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
+                      <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                     </div>
                     <div class="min-w-0 flex-1">
                       <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">
@@ -2559,7 +2592,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                       <div class="min-w-0">
                         <div class="flex flex-wrap items-center gap-2">
                           <span class="text-lg font-semibold text-[color:var(--text-primary)]">{{ person.displayName }}</span>
-                          <span class="truncate text-base text-[color:var(--text-muted)]">{{ person.handle }}@{{ person.instance }}</span>
+                          <span class="truncate text-base text-[color:var(--text-muted)]">{{ formatHandleInstance(person.handle, person.instance) }}</span>
                         </div>
                         <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ person.followers }} 关注者</div>
                         <div class="mt-2 line-clamp-2 text-base leading-relaxed text-[color:var(--text-secondary)]">{{ person.bio }}</div>
@@ -2727,8 +2760,9 @@ watch([likedPosts, bookmarkedPosts], () => {
                     class="flex w-full items-start gap-3 px-5 py-4 text-left transition hover:bg-[var(--chip-hover)]"
                     :class="selectedConversationId === conversation.id ? 'bg-emerald-500/10' : ''"
                   >
-                    <div class="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
-                      {{ conversation.avatarLabel }}
+                    <div class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                      <img v-if="conversation.avatarUrl" :src="conversation.avatarUrl" class="h-full w-full object-cover" />
+                      <template v-else>{{ conversation.avatarLabel }}</template>
                     </div>
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between gap-3">
@@ -2749,9 +2783,13 @@ watch([likedPosts, bookmarkedPosts], () => {
 
               <div class="flex min-h-0 flex-col bg-[var(--frame-bg)]">
                 <template v-if="activeConversation">
-                  <div class="flex shrink-0 items-center gap-4 border-b border-[color:var(--border-color)] px-6 py-5">
-                    <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
-                      {{ activeConversation.avatarLabel }}
+                  <div
+                    class="flex shrink-0 items-center gap-4 border-b border-[color:var(--border-color)] px-6 py-5"
+                    :style="activeConversation.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${activeConversation.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
+                  >
+                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                      <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
+                      <template v-else>{{ activeConversation.avatarLabel }}</template>
                     </div>
                     <div class="min-w-0">
                       <div class="truncate text-lg font-semibold text-[color:var(--text-primary)]">{{ activeConversation.name }}</div>
@@ -2772,14 +2810,15 @@ watch([likedPosts, bookmarkedPosts], () => {
                         :class="message.from === 'me' ? 'justify-end' : 'justify-start'"
                       >
                         <template v-if="message.from === 'peer'">
-                          <div class="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-sm font-bold text-slate-900">
-                            {{ activeConversation.avatarLabel }}
+                          <div class="flex h-10 w-10 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-sm font-bold text-slate-900">
+                            <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
+                            <template v-else>{{ activeConversation.avatarLabel }}</template>
                           </div>
                           <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm leading-6 text-[color:var(--text-primary)] shadow-sm">
                             <template v-if="message.forwardedPost">
                               <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-400">转发帖子</div>
                               <div class="rounded-xl border border-emerald-500/30 bg-emerald-500/8 p-3">
-                                <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · @{{ message.forwardedPost.handle }}@{{ message.forwardedPost.instance }}</div>
+                                <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
                                 <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-[color:var(--text-primary)]">{{ message.forwardedPost.content }}</div>
                               </div>
                             </template>
@@ -2793,15 +2832,16 @@ watch([likedPosts, bookmarkedPosts], () => {
                             <template v-if="message.forwardedPost">
                               <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-100/90">转发帖子</div>
                               <div class="rounded-xl border border-emerald-200/40 bg-emerald-500/15 p-3">
-                                <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · @{{ message.forwardedPost.handle }}@{{ message.forwardedPost.instance }}</div>
+                                <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
                                 <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-white">{{ message.forwardedPost.content }}</div>
                               </div>
                             </template>
                             <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>
                           </div>
-                          <div class="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
-                            {{ avatarText(currentUser?.displayName || 'U') }}
+                          <div class="flex h-10 w-10 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                            <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
+                            <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                           </div>
                         </template>
                       </div>
@@ -2816,8 +2856,9 @@ watch([likedPosts, bookmarkedPosts], () => {
 
                   <div class="shrink-0 border-t border-[color:var(--border-color)] bg-[var(--panel-soft)] px-6 py-5">
                     <div class="flex items-end gap-4">
-                      <div class="flex h-11 w-11 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
-                        {{ avatarText(currentUser?.displayName || 'U') }}
+                      <div class="flex h-11 w-11 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                        <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
+                        <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                       </div>
                       <div class="min-w-0 flex-1 rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-4 py-3">
                         <textarea
@@ -3184,3 +3225,4 @@ watch([likedPosts, bookmarkedPosts], () => {
   scrollbar-width: none;
 }
 </style>
+
