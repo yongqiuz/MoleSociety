@@ -40,8 +40,8 @@ services:
       REDIS_ADDR: redis:6379
       DB_MIGRATIONS_DIR: ./migrations
       SOCIAL_SEED: "1"
-      COOKIE_SECURE: "false"
-      COOKIE_SAMESITE: "Lax"
+      COOKIE_SECURE: "true"
+      COOKIE_SAMESITE: "None"
     ports:
       - "8081:8080"
 
