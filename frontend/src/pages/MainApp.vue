@@ -114,6 +114,14 @@ type MessageCard = {
   from: 'me' | 'peer';
   text: string;
   time: string;
+  forwardedPost?: {
+    id: string;
+    author: string;
+    handle: string;
+    instance: string;
+    content: string;
+    createdAt?: string;
+  } | null;
   assetUri?: string;
   chainId?: string;
   txHash?: string;
@@ -193,8 +201,11 @@ const apiOnline = ref(false);
 const errorMessage = ref('');
 const followedUsers = ref<Record<string, boolean>>({});
 const likedPosts = ref<Record<string, boolean>>({});
-const boostedPosts = ref<Record<string, boolean>>({});
 const bookmarkedPosts = ref<Record<string, boolean>>({});
+const showForwardDialog = ref(false);
+const forwardingPost = ref<FeedCard | null>(null);
+const forwardingConversationId = ref('');
+const forwarding = ref(false);
 const selectedInstanceName = ref('all');
 const showInstanceDropdown = ref(false);
 const selectedPostId = ref('');
@@ -225,6 +236,9 @@ const MAX_TAG_LENGTH = 24;
 const RECENT_TAGS_STORAGE_KEY = 'mole-compose-recent-tags';
 const PULL_MAX_DISTANCE = 120;
 const PULL_REFRESH_THRESHOLD = 72;
+const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
+const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
+const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
 
 const isLoggedIn = computed(() => !!authSession.value);
 
@@ -519,12 +533,83 @@ function toggleLike(postId: string) {
   likedPosts.value = { ...likedPosts.value, [postId]: !likedPosts.value[postId] };
 }
 
-function toggleBoost(postId: string) {
-  boostedPosts.value = { ...boostedPosts.value, [postId]: !boostedPosts.value[postId] };
-}
-
 function toggleBookmark(postId: string) {
   bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: !bookmarkedPosts.value[postId] };
+}
+
+function likeStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${LIKE_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function bookmarkStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${BOOKMARK_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function loadInteractionState() {
+  if (typeof window === 'undefined') return;
+  const likeKey = likeStorageKey();
+  const bookmarkKey = bookmarkStorageKey();
+  likedPosts.value = {};
+  bookmarkedPosts.value = {};
+  if (likeKey) {
+    try {
+      likedPosts.value = JSON.parse(window.localStorage.getItem(likeKey) || '{}');
+    } catch {
+      likedPosts.value = {};
+    }
+  }
+  if (bookmarkKey) {
+    try {
+      bookmarkedPosts.value = JSON.parse(window.localStorage.getItem(bookmarkKey) || '{}');
+    } catch {
+      bookmarkedPosts.value = {};
+    }
+  }
+}
+
+function persistInteractionState() {
+  if (typeof window === 'undefined') return;
+  const likeKey = likeStorageKey();
+  const bookmarkKey = bookmarkStorageKey();
+  if (likeKey) {
+    window.localStorage.setItem(likeKey, JSON.stringify(likedPosts.value));
+  }
+  if (bookmarkKey) {
+    window.localStorage.setItem(bookmarkKey, JSON.stringify(bookmarkedPosts.value));
+  }
+}
+
+function toForwardedPostBody(post: FeedCard) {
+  const payload = {
+    id: post.id,
+    author: post.author,
+    handle: post.handle,
+    instance: post.instance,
+    content: post.content,
+    createdAt: post.time,
+  };
+  return `${FORWARDED_POST_PREFIX}${JSON.stringify(payload)}`;
+}
+
+function parseForwardedPostBody(text: string) {
+  if (!text.startsWith(FORWARDED_POST_PREFIX)) return null;
+  const raw = text.slice(FORWARDED_POST_PREFIX.length);
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      id: String(parsed.id || ''),
+      author: String(parsed.author || ''),
+      handle: String(parsed.handle || ''),
+      instance: String(parsed.instance || ''),
+      content: String(parsed.content || ''),
+      createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : '',
+    };
+  } catch {
+    return null;
+  }
 }
 
 // toneClass removed - moved to AppearanceSettings.vue
@@ -695,6 +780,7 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
       id: message.id,
       from: message.senderId === userId ? 'me' : 'peer',
       text: message.body,
+      forwardedPost: parseForwardedPostBody(message.body),
       time: formatTimestamp(message.createdAt),
       assetUri: message.assetUri,
       chainId: message.chainId,
@@ -1413,9 +1499,51 @@ async function sendMessage() {
   }
 }
 
+async function openForwardDialog(post: FeedCard) {
+  forwardingPost.value = post;
+  showForwardDialog.value = true;
+  errorMessage.value = '';
+  if (!conversations.value.length) {
+    await refreshConversations(true);
+  }
+  forwardingConversationId.value = selectedConversationId.value || conversations.value[0]?.id || '';
+}
+
+function closeForwardDialog() {
+  showForwardDialog.value = false;
+  forwardingPost.value = null;
+  forwardingConversationId.value = '';
+}
+
+async function forwardPostToConversation() {
+  if (!forwardingPost.value || !forwardingConversationId.value || !currentUser.value || forwarding.value) return;
+  forwarding.value = true;
+  try {
+    const updatedConversation = await createConversationMessage(forwardingConversationId.value, {
+      senderId: currentUser.value.id,
+      body: toForwardedPostBody(forwardingPost.value),
+    });
+    const mapped = toConversationCard(updatedConversation, currentUser.value?.id ?? null);
+    upsertConversation(mapped);
+    selectedConversationId.value = mapped.id;
+    currentSection.value = 'messages';
+    closeForwardDialog();
+    await scrollMessagesToBottom();
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '转发失败，请稍后重试。';
+  } finally {
+    forwarding.value = false;
+  }
+}
+
 onMounted(() => {
   void loadBootstrap();
   loadRecentPostTags();
+  loadInteractionState();
   document.addEventListener('click', handleDocumentClick);
 });
 
@@ -1433,6 +1561,17 @@ watch(
     }
   },
 );
+
+watch(
+  () => authSession.value?.id,
+  () => {
+    loadInteractionState();
+  },
+);
+
+watch([likedPosts, bookmarkedPosts], () => {
+  persistInteractionState();
+}, { deep: true });
 </script>
 
 <template>
@@ -1670,7 +1809,7 @@ watch(
                   <span class="block truncate text-sm font-semibold text-[color:var(--text-primary)]">
                     {{ selectedInstanceName === 'all' ? '全部摩尔实例' : selectedInstanceName }}
                   </span>
-                  <span class="block truncate text-xs text-[color:var(--text-muted)]">
+                  <span class="block whitespace-normal break-words text-xs text-[color:var(--text-muted)]">
                     {{ selectedInstanceName === 'all' ? `${instances.length} 个实例` : selectedInstance?.focus }}
                   </span>
                 </span>
@@ -1696,7 +1835,7 @@ watch(
                   :class="selectedInstanceName === instance.name ? 'text-emerald-400' : 'text-[color:var(--text-primary)]'"
                 >
                   <span class="block text-sm font-semibold">{{ instance.name }}</span>
-                  <span class="block truncate text-xs text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</span>
+                  <span class="block whitespace-normal break-words text-xs text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</span>
                 </button>
               </div>
             </div>
@@ -1820,11 +1959,10 @@ watch(
                       <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
                     </button>
                     <button
-                      @click="toggleBoost(post.id)"
-                      class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                      :class="boostedPosts[post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
+                      @click="openForwardDialog(post)"
+                      class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200"
                     >
-                      <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.boosts + (boostedPosts[post.id] ? 1 : 0) || '' }}
+                      <Repeat class="w-[18px] h-[18px] mr-1.5" /> 转发
                     </button>
                     <button
                       @click="toggleLike(post.id)"
@@ -2044,11 +2182,10 @@ watch(
                         <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.replies || '' }}
                       </button>
                       <button
-                        @click="toggleBoost(threadFocusPost.id)"
-                        class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                        :class="boostedPosts[threadFocusPost.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
+                        @click="openForwardDialog(threadFocusPost)"
+                        class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200"
                       >
-                        <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.boosts + (boostedPosts[threadFocusPost.id] ? 1 : 0) || '' }}
+                        <Repeat class="w-[18px] h-[18px] mr-1.5" /> 转发
                       </button>
                       <button
                         @click="toggleLike(threadFocusPost.id)"
@@ -2338,11 +2475,10 @@ watch(
                           <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
                         </button>
                         <button
-                          @click="toggleBoost(post.id)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
-                          :class="boostedPosts[post.id] ? 'text-emerald-400' : 'text-[color:var(--text-secondary)]'"
+                          @click="openForwardDialog(post)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
                         >
-                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.boosts + (boostedPosts[post.id] ? 1 : 0) || '' }}
+                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> 转发
                         </button>
                         <button
                           @click="toggleLike(post.id)"
@@ -2510,11 +2646,10 @@ watch(
                           <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
                         </button>
                         <button
-                          @click="toggleBoost(post.id)"
-                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
-                          :class="boostedPosts[post.id] ? 'text-emerald-400' : 'text-[color:var(--text-secondary)]'"
+                          @click="openForwardDialog(post)"
+                          class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium text-[color:var(--text-secondary)] transition-all hover:bg-emerald-500/10 hover:text-emerald-400"
                         >
-                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.boosts + (boostedPosts[post.id] ? 1 : 0) || '' }}
+                          <Repeat class="w-[18px] h-[18px] mr-1.5" /> 转发
                         </button>
                         <button
                           @click="toggleLike(post.id)"
@@ -2641,14 +2776,28 @@ watch(
                             {{ activeConversation.avatarLabel }}
                           </div>
                           <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm leading-6 text-[color:var(--text-primary)] shadow-sm">
-                            <div>{{ message.text }}</div>
+                            <template v-if="message.forwardedPost">
+                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-400">转发帖子</div>
+                              <div class="rounded-xl border border-emerald-500/30 bg-emerald-500/8 p-3">
+                                <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · @{{ message.forwardedPost.handle }}@{{ message.forwardedPost.instance }}</div>
+                                <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-[color:var(--text-primary)]">{{ message.forwardedPost.content }}</div>
+                              </div>
+                            </template>
+                            <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-[color:var(--text-muted)]">{{ message.time }}</div>
                           </div>
                         </template>
 
                         <template v-else>
                           <div class="max-w-[75%] rounded-[22px] rounded-br-md bg-emerald-600 px-4 py-3 text-sm leading-6 text-white shadow-[0_10px_30px_rgba(16,185,129,0.22)]">
-                            <div>{{ message.text }}</div>
+                            <template v-if="message.forwardedPost">
+                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-100/90">转发帖子</div>
+                              <div class="rounded-xl border border-emerald-200/40 bg-emerald-500/15 p-3">
+                                <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · @{{ message.forwardedPost.handle }}@{{ message.forwardedPost.instance }}</div>
+                                <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-white">{{ message.forwardedPost.content }}</div>
+                              </div>
+                            </template>
+                            <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>
                           </div>
                           <div class="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
@@ -2854,6 +3003,59 @@ watch(
           </div>
         </aside>
       </div>
+
+      <Transition name="modal">
+        <div
+          v-if="showForwardDialog"
+          class="fixed inset-0 z-[230] flex items-center justify-center bg-black/45 px-4"
+          @click="closeForwardDialog"
+        >
+          <div
+            class="relative w-full max-w-lg rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.45)]"
+            @click.stop
+          >
+            <div class="mb-4 flex items-center justify-between">
+              <div>
+                <div class="text-lg font-semibold text-[color:var(--text-primary)]">转发到会话</div>
+                <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择一个联系人会话并发送</div>
+              </div>
+              <button @click="closeForwardDialog" class="rounded-lg p-1.5 text-[color:var(--text-muted)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]">
+                <X class="h-4 w-4" />
+              </button>
+            </div>
+            <div class="mb-4 max-h-64 overflow-y-auto rounded-2xl border border-[color:var(--border-color)]">
+              <button
+                v-for="conversation in conversations"
+                :key="conversation.id"
+                @click="forwardingConversationId = conversation.id"
+                class="flex w-full items-center justify-between border-b border-[color:var(--border-color)] px-4 py-3 text-left last:border-b-0"
+                :class="forwardingConversationId === conversation.id ? 'bg-emerald-500/10' : 'hover:bg-[var(--panel-soft)]'"
+              >
+                <div class="min-w-0">
+                  <div class="truncate text-sm font-semibold text-[color:var(--text-primary)]">{{ conversation.name }}</div>
+                  <div class="truncate text-xs text-[color:var(--text-muted)]">{{ conversation.handle }}</div>
+                </div>
+                <div v-if="forwardingConversationId === conversation.id" class="text-xs font-semibold text-emerald-300">已选择</div>
+              </button>
+              <div v-if="conversations.length === 0" class="px-4 py-8 text-center text-sm text-[color:var(--text-muted)]">
+                暂无会话，请先在“用户”页发起聊天。
+              </div>
+            </div>
+            <div class="flex items-center justify-end gap-3">
+              <button @click="closeForwardDialog" class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-medium text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)]">
+                取消
+              </button>
+              <button
+                :disabled="!forwardingConversationId || !forwardingPost || forwarding"
+                @click="forwardPostToConversation"
+                class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {{ forwarding ? '转发中...' : '确认转发' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
 
       <Transition name="modal">
         <div
