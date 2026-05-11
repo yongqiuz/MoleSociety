@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Bookmark, Heart, MessageCircle, MoreHorizontal, Repeat } from 'lucide-vue-next';
+import MentionText from '../common/MentionText.vue';
 
 type PollOption = {
   label: string;
@@ -37,6 +38,7 @@ type FeedCard = {
     replies: number;
     boosts: number;
     likes: number;
+    bookmarks: number;
   };
   poll?: Poll;
 };
@@ -49,6 +51,12 @@ const props = defineProps<{
   currentUserId?: string;
   showMoreMenu?: boolean;
   moreMenuOpen?: boolean;
+  mentionUsers?: Array<{
+    id: string;
+    handle: string;
+    displayName: string;
+    instance?: string;
+  }>;
 }>();
 
 const emit = defineEmits<{
@@ -91,7 +99,9 @@ function avatarText(name: string) {
             <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
           </div>
           <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
-          <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
+          <div class="mt-3 text-[15px] leading-7 text-[color:var(--text-soft)]">
+            <MentionText :text="post.content" :users="mentionUsers" @open-profile="(id) => emit('open-profile', id)" />
+          </div>
 
           <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
             <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
@@ -121,12 +131,12 @@ function avatarText(name: string) {
             </div>
           </div>
 
-          <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-            <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
+          <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl">
+            <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full h-auto object-contain" />
           </div>
 
           <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
-            <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
+            <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-600 px-3 py-1 text-sm font-semibold text-white shadow-sm">
               #{{ tag }}
             </span>
           </div>
@@ -158,6 +168,7 @@ function avatarText(name: string) {
             :class="bookmarked ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
           >
             <Bookmark :class="{ 'fill-current': bookmarked }" class="mr-1.5 h-[18px] w-[18px]" />
+            {{ post.stats.bookmarks || '' }}
           </button>
 
           <div v-if="showMoreMenu" class="relative ml-auto">
@@ -175,6 +186,13 @@ function avatarText(name: string) {
               <div class="py-1">
                 <button @click="emit('menu-action', 'share', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
                 <button @click="emit('menu-action', 'mention', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
+                <button
+                  v-if="currentUserId && post.authorId === currentUserId"
+                  @click="emit('menu-action', 'delete', post)"
+                  class="w-full px-4 py-2.5 text-left text-rose-500 hover:bg-rose-500/10"
+                >
+                  删除帖子
+                </button>
               </div>
             </div>
           </div>

@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.math.BigInteger;
 import java.net.URI;
@@ -39,7 +40,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import javax.xml.parsers.DocumentBuilderFactory;
 import org.bouncycastle.jcajce.provider.digest.Keccak;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -62,6 +67,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 import redis.clients.jedis.JedisPooled;
 
 @SpringBootApplication
@@ -416,10 +424,38 @@ class SocialController {
     }
   }
 
+  @DeleteMapping("/posts/{id}")
+  ResponseEntity<ApiResponse<Map<String, Object>>> deletePost(@PathVariable String id, HttpServletRequest request) {
+    try {
+      social.deletePost(id, requiredUser(request).id);
+      return ApiResponse.ok(Map.of("deleted", true, "id", id));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
   @PostMapping("/posts/{id}/poll/vote")
   ResponseEntity<ApiResponse<SocialPost>> vote(@PathVariable String id, @RequestBody VotePollRequest req, HttpServletRequest request) {
     try {
       return ApiResponse.ok(social.votePoll(id, requiredUser(request).id, req.optionIndices));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @PostMapping("/posts/{id}/bookmark")
+  ResponseEntity<ApiResponse<SocialPost>> bookmark(@PathVariable String id, HttpServletRequest request) {
+    try {
+      return ApiResponse.ok(social.bookmarkPost(id, requiredUser(request).id));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @DeleteMapping("/posts/{id}/bookmark")
+  ResponseEntity<ApiResponse<SocialPost>> unbookmark(@PathVariable String id, HttpServletRequest request) {
+    try {
+      return ApiResponse.ok(social.unbookmarkPost(id, requiredUser(request).id));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -497,6 +533,12 @@ class LegacyController {
   ResponseEntity<ApiResponse<Map<String, Object>>> reset(@RequestParam(defaultValue = "1") String seed) {
     social.reset(Env.truthy(seed));
     return ApiResponse.ok(Map.of("seed", Env.truthy(seed), "socialStats", social.stats()));
+  }
+
+  @PostMapping("/api/admin/social/news/pull")
+  ResponseEntity<ApiResponse<Map<String, Object>>> pullNews() {
+    int created = social.pullNewsAndPublish();
+    return ApiResponse.ok(Map.of("created", created, "socialStats", social.stats()));
   }
 
   @GetMapping("/api/v1/analytics/distribution")
@@ -613,6 +655,7 @@ class PersistenceService {
           st.executeUpdate("DELETE FROM conversation_participants");
           st.executeUpdate("DELETE FROM conversations");
           st.executeUpdate("DELETE FROM post_media_links");
+          st.executeUpdate("DELETE FROM post_bookmarks");
           st.executeUpdate("DELETE FROM social_posts");
           st.executeUpdate("DELETE FROM media_assets");
           st.executeUpdate("DELETE FROM user_follows");
@@ -628,6 +671,9 @@ class PersistenceService {
       for (Conversation conversation : state.conversations) saveConversation(conversation);
       for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
         for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
+      }
+      for (Map.Entry<String, Set<String>> entry : state.bookmarks.entrySet()) {
+        for (String postID : entry.getValue()) saveBookmark(entry.getKey(), postID);
       }
     }
     saveSocialSnapshot(state);
@@ -647,6 +693,9 @@ class PersistenceService {
       for (Conversation conversation : state.conversations) saveConversation(conversation);
       for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
         for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
+      }
+      for (Map.Entry<String, Set<String>> entry : state.bookmarks.entrySet()) {
+        for (String postID : entry.getValue()) saveBookmark(entry.getKey(), postID);
       }
     }
     saveSocialSnapshot(state);
@@ -679,6 +728,7 @@ class PersistenceService {
     setJson("social:snapshot:conversations", state.conversations, 0);
     setJson("social:snapshot:instances", state.instances, 0);
     setJson("social:snapshot:follows", state.follows, 0);
+    setJson("social:snapshot:bookmarks", state.bookmarks, 0);
   }
 
   Optional<SocialState> loadSocialSnapshot() {
@@ -691,6 +741,10 @@ class PersistenceService {
       state.conversations.addAll(readJson("social:snapshot:conversations", new TypeReference<List<Conversation>>() {}));
       state.instances.addAll(readJson("social:snapshot:instances", new TypeReference<List<FederationInstance>>() {}));
       state.follows.putAll(readJson("social:snapshot:follows", new TypeReference<Map<String, Set<String>>>() {}));
+      try {
+        state.bookmarks.putAll(readJson("social:snapshot:bookmarks", new TypeReference<Map<String, Set<String>>>() {}));
+      } catch (RuntimeException ignored) {
+      }
       return Optional.of(state);
     } catch (RuntimeException err) {
       return Optional.empty();
@@ -883,14 +937,14 @@ class PersistenceService {
       try (PreparedStatement ps = conn.prepareStatement("""
           INSERT INTO social_posts(id, author_id, instance, kind, content, visibility, storage_uri, attestation_uri,
             chain_id, tx_hash, contract_address, explorer_url, tags_json, parent_post_id, root_post_id,
-            reply_depth, replies_count, boosts_count, likes_count, type, interaction, poll_json, created_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?::jsonb,?)
+            reply_depth, replies_count, boosts_count, likes_count, bookmark_count, type, interaction, poll_json, created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?::jsonb,?)
           ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, content=EXCLUDED.content, visibility=EXCLUDED.visibility,
             instance=EXCLUDED.instance, storage_uri=EXCLUDED.storage_uri, attestation_uri=EXCLUDED.attestation_uri,
             chain_id=EXCLUDED.chain_id, tx_hash=EXCLUDED.tx_hash, contract_address=EXCLUDED.contract_address, explorer_url=EXCLUDED.explorer_url,
             tags_json=EXCLUDED.tags_json, parent_post_id=EXCLUDED.parent_post_id, root_post_id=EXCLUDED.root_post_id,
             reply_depth=EXCLUDED.reply_depth, replies_count=EXCLUDED.replies_count, boosts_count=EXCLUDED.boosts_count,
-            likes_count=EXCLUDED.likes_count, type=EXCLUDED.type, interaction=EXCLUDED.interaction, poll_json=EXCLUDED.poll_json
+            likes_count=EXCLUDED.likes_count, bookmark_count=EXCLUDED.bookmark_count, type=EXCLUDED.type, interaction=EXCLUDED.interaction, poll_json=EXCLUDED.poll_json
           """)) {
         ps.setString(1, post.id);
         ps.setString(2, post.authorId);
@@ -911,10 +965,11 @@ class PersistenceService {
         ps.setInt(17, post.replies);
         ps.setInt(18, post.boosts);
         ps.setInt(19, post.likes);
-        ps.setString(20, Strings.or(post.type, "post"));
-        ps.setString(21, Strings.or(post.interaction, "anyone"));
-        ps.setString(22, post.poll == null ? "null" : json(post.poll));
-        ps.setTimestamp(23, timestamp(post.createdAt));
+        ps.setInt(20, post.bookmarks);
+        ps.setString(21, Strings.or(post.type, "post"));
+        ps.setString(22, Strings.or(post.interaction, "anyone"));
+        ps.setString(23, post.poll == null ? "null" : json(post.poll));
+        ps.setTimestamp(24, timestamp(post.createdAt));
         ps.executeUpdate();
       }
       try (PreparedStatement delete = conn.prepareStatement("DELETE FROM post_media_links WHERE post_id = ?")) {
@@ -950,6 +1005,38 @@ class PersistenceService {
       try (PreparedStatement ps = conn.prepareStatement("DELETE FROM user_follows WHERE follower_id=? AND followee_id=?")) {
         ps.setString(1, followerID);
         ps.setString(2, targetID);
+        ps.executeUpdate();
+      }
+    });
+  }
+
+  void saveBookmark(String userID, String postID) {
+    if (!databaseAvailable) return;
+    exec(conn -> {
+      try (PreparedStatement ps = conn.prepareStatement("INSERT INTO post_bookmarks(user_id, post_id) VALUES (?,?) ON CONFLICT DO NOTHING")) {
+        ps.setString(1, userID);
+        ps.setString(2, postID);
+        ps.executeUpdate();
+      }
+    });
+  }
+
+  void deleteBookmark(String userID, String postID) {
+    if (!databaseAvailable) return;
+    exec(conn -> {
+      try (PreparedStatement ps = conn.prepareStatement("DELETE FROM post_bookmarks WHERE user_id=? AND post_id=?")) {
+        ps.setString(1, userID);
+        ps.setString(2, postID);
+        ps.executeUpdate();
+      }
+    });
+  }
+
+  void deletePost(String postID) {
+    if (!databaseAvailable) return;
+    exec(conn -> {
+      try (PreparedStatement ps = conn.prepareStatement("DELETE FROM social_posts WHERE id=?")) {
+        ps.setString(1, postID);
         ps.executeUpdate();
       }
     });
@@ -1083,6 +1170,8 @@ class PersistenceService {
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS contract_address TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS explorer_url TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS poll_json JSONB");
+      st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS bookmark_count INTEGER NOT NULL DEFAULT 0");
+      st.executeUpdate("CREATE TABLE IF NOT EXISTS post_bookmarks (user_id TEXT NOT NULL REFERENCES social_users(id) ON DELETE CASCADE, post_id TEXT NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE, PRIMARY KEY (user_id, post_id))");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS fields_json JSONB NOT NULL DEFAULT '[]'::jsonb");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS featured_tags_json JSONB NOT NULL DEFAULT '[]'::jsonb");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE");
@@ -1169,6 +1258,7 @@ class PersistenceService {
           post.replies = rs.getInt("replies_count");
           post.boosts = rs.getInt("boosts_count");
           post.likes = rs.getInt("likes_count");
+          post.bookmarks = rs.getInt("bookmark_count");
           post.type = rs.getString("type");
           post.interaction = rs.getString("interaction");
           String pollJson = rs.getString("poll_json");
@@ -1181,6 +1271,10 @@ class PersistenceService {
       try (PreparedStatement ps = conn.prepareStatement("SELECT follower_id, followee_id FROM user_follows")) {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) state.follows.computeIfAbsent(rs.getString(1), key -> new HashSet<>()).add(rs.getString(2));
+      }
+      try (PreparedStatement ps = conn.prepareStatement("SELECT user_id, post_id FROM post_bookmarks")) {
+        ResultSet rs = ps.executeQuery();
+        while (rs.next()) state.bookmarks.computeIfAbsent(rs.getString(1), key -> new HashSet<>()).add(rs.getString(2));
       }
       try (PreparedStatement ps = conn.prepareStatement("SELECT id, title, initiator_id, encrypted, asset_uri, chain_id, tx_hash, contract_address, explorer_url, updated_at FROM conversations ORDER BY updated_at DESC")) {
         ResultSet rs = ps.executeQuery();
@@ -1369,6 +1463,7 @@ class SocialState {
   public List<Conversation> conversations = new ArrayList<>();
   public List<FederationInstance> instances = new ArrayList<>();
   public Map<String, Set<String>> follows = new HashMap<>();
+  public Map<String, Set<String>> bookmarks = new HashMap<>();
 }
 
 @Service
@@ -1787,12 +1882,19 @@ class AuthService {
 class SocialService {
   private final PersistenceService persistence;
   private final ActiveSessionRegistry activeSessions;
+  private final ScheduledExecutorService newsScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+    Thread t = new Thread(r, "molesociety-news-autopublisher");
+    t.setDaemon(true);
+    return t;
+  });
   private final List<SocialUser> users = new ArrayList<>();
   private final List<SocialPost> posts = new ArrayList<>();
   private final List<MediaAsset> media = new ArrayList<>();
   private final List<Conversation> conversations = new ArrayList<>();
   private final List<FederationInstance> instances = new ArrayList<>();
   private final Map<String, Set<String>> follows = new HashMap<>();
+  private final Map<String, Set<String>> bookmarks = new HashMap<>();
+  private final Set<String> seenNewsFingerprints = new LinkedHashSet<>();
 
   SocialService(PersistenceService persistence, ActiveSessionRegistry activeSessions) {
     this.persistence = persistence;
@@ -1804,6 +1906,32 @@ class SocialService {
       ensureChainAssets();
       persistence.saveLoadedSocialState(snapshot());
     }
+    initNewsAutoPublisher();
+  }
+
+  private void initNewsAutoPublisher() {
+    if (!Env.truthy(Env.get("NEWS_AUTO_ENABLED", "0"))) return;
+    int everyMinutes = (int) Math.max(5L, Env.longValue("NEWS_PULL_MINUTES", 1440L));
+    long initialDelaySeconds = Math.max(5L, Env.longValue("NEWS_INITIAL_DELAY_SECONDS", 20L));
+    synchronized (this) {
+      rebuildNewsFingerprintIndex();
+    }
+    newsScheduler.scheduleAtFixedRate(this::pullNewsAndPublishSafe, initialDelaySeconds, everyMinutes * 60L, TimeUnit.SECONDS);
+  }
+
+  private void pullNewsAndPublishSafe() {
+    try {
+      pullNewsAndPublish();
+    } catch (Exception ignored) {
+    }
+  }
+
+  private synchronized void rebuildNewsFingerprintIndex() {
+    seenNewsFingerprints.clear();
+    for (SocialPost post : posts) {
+      if (!"news".equalsIgnoreCase(Strings.or(post.type, ""))) continue;
+      seenNewsFingerprints.add(newsFingerprint(post.content));
+    }
   }
 
   synchronized void reset(boolean seed) {
@@ -1813,6 +1941,7 @@ class SocialService {
     conversations.clear();
     instances.clear();
     follows.clear();
+    bookmarks.clear();
     if (seed) {
       seed();
     }
@@ -1827,12 +1956,14 @@ class SocialService {
     conversations.clear();
     instances.clear();
     follows.clear();
+    bookmarks.clear();
     users.addAll(state.users);
     posts.addAll(state.posts);
     media.addAll(state.media);
     conversations.addAll(state.conversations);
     instances.addAll(state.instances);
     follows.putAll(state.follows);
+    bookmarks.putAll(state.bookmarks);
     ensureChainAssets();
     refreshPostCounts();
     refreshFollowCounts();
@@ -1847,6 +1978,9 @@ class SocialService {
     state.instances.addAll(instances);
     for (Map.Entry<String, Set<String>> entry : follows.entrySet()) {
       state.follows.put(entry.getKey(), new HashSet<>(entry.getValue()));
+    }
+    for (Map.Entry<String, Set<String>> entry : bookmarks.entrySet()) {
+      state.bookmarks.put(entry.getKey(), new HashSet<>(entry.getValue()));
     }
     return state;
   }
@@ -1944,6 +2078,47 @@ class SocialService {
     persistence.saveSocialSnapshot(snapshot());
   }
 
+  synchronized SocialPost bookmarkPost(String postID, String userID) {
+    getUser(userID);
+    SocialPost post = getPost(postID, userID);
+    bookmarks.computeIfAbsent(userID, key -> new HashSet<>()).add(post.id);
+    refreshPostCounts();
+    persistence.saveBookmark(userID, post.id);
+    persistence.savePost(post);
+    persistence.saveSocialSnapshot(snapshot());
+    return post;
+  }
+
+  synchronized SocialPost unbookmarkPost(String postID, String userID) {
+    getUser(userID);
+    SocialPost post = getPost(postID, userID);
+    Set<String> set = bookmarks.get(userID);
+    if (set != null) set.remove(post.id);
+    refreshPostCounts();
+    persistence.deleteBookmark(userID, post.id);
+    persistence.savePost(post);
+    persistence.saveSocialSnapshot(snapshot());
+    return post;
+  }
+
+  synchronized void deletePost(String postID, String userID) {
+    SocialPost post = getPost(postID, userID);
+    if (!Objects.equals(post.authorId, userID)) {
+      throw ApiException.forbidden("SOCIAL_DELETE_FORBIDDEN", "permission", "cannot delete others post");
+    }
+    posts.removeIf(item -> Objects.equals(item.id, postID));
+    for (SocialPost item : posts) {
+      if (Objects.equals(item.parentPostId, postID)) item.parentPostId = "";
+      if (Objects.equals(item.rootPostId, postID)) item.rootPostId = "";
+    }
+    for (Set<String> set : bookmarks.values()) {
+      set.remove(postID);
+    }
+    refreshPostCounts();
+    persistence.deletePost(postID);
+    persistence.saveSocialSnapshot(snapshot());
+  }
+
   synchronized List<SocialUser> listFollowers(String userID, int limit) {
     getUser(userID);
     Set<String> followerIDs = follows.entrySet().stream()
@@ -2034,6 +2209,173 @@ class SocialService {
     refreshPostCounts();
     persistence.savePost(post);
     persistence.saveSocialSnapshot(snapshot());
+    return post;
+  }
+
+  synchronized int pullNewsAndPublish() {
+    List<String> feeds = configuredNewsFeeds();
+    if (feeds.isEmpty()) return 0;
+    SocialUser author = ensureNewsPublisherUser();
+    int maxPerRun = (int) Math.max(1L, Env.longValue("NEWS_MAX_ITEMS_PER_RUN", 6L));
+    int created = 0;
+    for (String feedUrl : feeds) {
+      if (created >= maxPerRun) break;
+      for (NewsEntry entry : fetchNewsEntries(feedUrl, maxPerRun - created)) {
+        String fingerprint = newsFingerprint(entry.link + "|" + entry.title);
+        if (seenNewsFingerprints.contains(fingerprint)) continue;
+        SocialPost newsPost = createNewsPost(author, entry);
+        posts.add(0, newsPost);
+        seenNewsFingerprints.add(fingerprint);
+        persistence.savePost(newsPost);
+        created++;
+        if (created >= maxPerRun) break;
+      }
+    }
+    if (created > 0) {
+      refreshPostCounts();
+      persistence.saveSocialSnapshot(snapshot());
+    }
+    return created;
+  }
+
+  private List<String> configuredNewsFeeds() {
+    String raw = Strings.value(Env.get("NEWS_FEED_URLS", ""));
+    List<String> feeds = new ArrayList<>();
+    for (String item : raw.split("[,;\\n]")) {
+      String url = Strings.value(item).trim();
+      if (Strings.hasText(url)) feeds.add(url);
+    }
+    return feeds;
+  }
+
+  private SocialUser ensureNewsPublisherUser() {
+    String configured = Strings.value(Env.get("NEWS_AUTHOR_ID", "")).trim();
+    if (Strings.hasText(configured)) {
+      Optional<SocialUser> existing = findUser(configured);
+      if (existing.isPresent()) return existing.get();
+    }
+    Optional<SocialUser> existingBot = users.stream().filter(u -> "@news_bot".equalsIgnoreCase(u.handle)).findFirst();
+    if (existingBot.isPresent()) return existingBot.get();
+    SocialUser bot = new SocialUser();
+    bot.id = nextID("user");
+    bot.handle = "@news_bot";
+    bot.displayName = Strings.or(Env.get("NEWS_AUTHOR_NAME", ""), "鼹鼠新闻台");
+    bot.bio = "自动聚合新闻源并发布为新闻摩文。";
+    bot.instance = primaryMoleInstanceName();
+    bot.wallet = "0xnewsbot";
+    bot.avatarUrl = "";
+    bot.backgroundUrl = "";
+    bot.fields = new ArrayList<>();
+    bot.featuredTags = List.of("新闻", "资讯");
+    bot.createdAt = Instant.now().toString();
+    users.add(0, bot);
+    persistence.saveUser(bot);
+    return bot;
+  }
+
+  private List<NewsEntry> fetchNewsEntries(String feedUrl, int limit) {
+    try {
+      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+      factory.setXIncludeAware(false);
+      factory.setExpandEntityReferences(false);
+      HttpURLConnection conn = (HttpURLConnection) URI.create(feedUrl).toURL().openConnection();
+      conn.setRequestMethod("GET");
+      conn.setConnectTimeout(4000);
+      conn.setReadTimeout(5000);
+      conn.setRequestProperty("User-Agent", "MoleSocietyNewsBot/1.0");
+      try (InputStream in = conn.getInputStream()) {
+        Document doc = factory.newDocumentBuilder().parse(in);
+        List<NewsEntry> entries = parseRssItems(doc, limit);
+        if (entries.isEmpty()) entries = parseAtomEntries(doc, limit);
+        return entries;
+      } finally {
+        conn.disconnect();
+      }
+    } catch (Exception ignored) {
+      return List.of();
+    }
+  }
+
+  private List<NewsEntry> parseRssItems(Document doc, int limit) {
+    NodeList items = doc.getElementsByTagName("item");
+    List<NewsEntry> result = new ArrayList<>();
+    for (int i = 0; i < items.getLength() && result.size() < limit; i++) {
+      if (!(items.item(i) instanceof Element item)) continue;
+      String title = childText(item, "title");
+      String link = childText(item, "link");
+      if (!Strings.hasText(title) || !Strings.hasText(link)) continue;
+      String source = Strings.or(childText(item, "source"), sourceHost(link));
+      result.add(new NewsEntry(title.trim(), link.trim(), source));
+    }
+    return result;
+  }
+
+  private List<NewsEntry> parseAtomEntries(Document doc, int limit) {
+    NodeList entries = doc.getElementsByTagName("entry");
+    List<NewsEntry> result = new ArrayList<>();
+    for (int i = 0; i < entries.getLength() && result.size() < limit; i++) {
+      if (!(entries.item(i) instanceof Element entry)) continue;
+      String title = childText(entry, "title");
+      String link = "";
+      NodeList links = entry.getElementsByTagName("link");
+      for (int j = 0; j < links.getLength(); j++) {
+        if (!(links.item(j) instanceof Element e)) continue;
+        String href = Strings.value(e.getAttribute("href")).trim();
+        if (Strings.hasText(href)) {
+          link = href;
+          break;
+        }
+      }
+      if (!Strings.hasText(title) || !Strings.hasText(link)) continue;
+      result.add(new NewsEntry(title.trim(), link.trim(), sourceHost(link)));
+    }
+    return result;
+  }
+
+  private String childText(Element root, String tag) {
+    NodeList list = root.getElementsByTagName(tag);
+    if (list.getLength() == 0) return "";
+    return Strings.value(list.item(0).getTextContent());
+  }
+
+  private String sourceHost(String link) {
+    try {
+      String host = URI.create(link).getHost();
+      if (!Strings.hasText(host)) return "新闻源";
+      return host.replaceFirst("^www\\.", "");
+    } catch (Exception ignored) {
+      return "新闻源";
+    }
+  }
+
+  private String newsFingerprint(String value) {
+    return sha256Hex(Strings.value(value).trim().toLowerCase(Locale.ROOT));
+  }
+
+  private SocialPost createNewsPost(SocialUser author, NewsEntry entry) {
+    SocialPost post = new SocialPost();
+    post.id = nextID("post");
+    post.authorId = author.id;
+    post.authorHandle = author.handle;
+    post.authorName = author.displayName;
+    post.instance = author.instance;
+    post.kind = "post";
+    post.content = "【" + Strings.or(entry.source, "新闻源") + "】" + entry.title + "\n" + entry.link;
+    post.visibility = "public";
+    post.storageUri = "news://auto/" + post.id;
+    post.attestationUri = "news://attestation/" + post.id;
+    post.tags = List.of("新闻", "热点");
+    post.media = new ArrayList<>();
+    post.type = "news";
+    post.interaction = "anyone";
+    post.parentPostId = "";
+    post.rootPostId = "";
+    post.replyDepth = 0;
+    post.createdAt = Instant.now().toString();
+    applyPostChainAsset(post);
     return post;
   }
 
@@ -2545,6 +2887,7 @@ class SocialService {
   private void refreshPostCounts() {
     for (SocialPost post : posts) {
       post.replies = (int) posts.stream().filter(p -> post.id.equals(p.parentPostId) || post.id.equals(p.rootPostId)).count();
+      post.bookmarks = (int) bookmarks.values().stream().filter(set -> set.contains(post.id)).count();
     }
   }
 
@@ -2639,6 +2982,18 @@ class ApiException extends RuntimeException {
 
   static ApiException conflict(String code, String type, String message) {
     return new ApiException(HttpStatus.CONFLICT, code, type, message);
+  }
+}
+
+class NewsEntry {
+  final String title;
+  final String link;
+  final String source;
+
+  NewsEntry(String title, String link, String source) {
+    this.title = title;
+    this.link = link;
+    this.source = source;
   }
 }
 
@@ -2804,6 +3159,7 @@ class SocialPost {
   public int replies;
   public int boosts;
   public int likes;
+  public int bookmarks;
   public String type;
   public String interaction;
   public Poll poll;

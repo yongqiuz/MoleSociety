@@ -406,13 +406,13 @@ watch(
                 <button
                   @click="toggleFollow"
                   :disabled="followLoading"
-                  class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-400 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {{ followLoading ? '处理中...' : following ? '取消关注' : '关注' }}
                 </button>
                 <button
                   @click="goStartConversation"
-                  class="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
+                  class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-cyan-500 hover:shadow-cyan-500/25"
                 >
                   发消息
                 </button>
@@ -460,12 +460,12 @@ watch(
                 <div class="mt-2 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-secondary)]">{{ post.content }}</div>
                 <div
                   v-if="Array.isArray(post.media) && post.media.length > 0"
-                  class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]"
+                  class="mt-4 overflow-hidden rounded-2xl"
                 >
                   <img
                     :src="post.media[0].url"
                     :alt="post.media[0].name || '帖子图片'"
-                    class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]"
+                    class="max-h-[70vh] w-full h-auto object-contain"
                   />
                 </div>
                 <div v-if="post.tags.length" class="mt-3 flex flex-wrap gap-2">

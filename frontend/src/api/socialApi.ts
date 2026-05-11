@@ -57,6 +57,7 @@ export type SocialPost = {
   replies: number;
   boosts: number;
   likes: number;
+  bookmarks?: number;
   poll?: Poll;
   createdAt: string;
 };
@@ -254,6 +255,25 @@ export async function fetchPostThread(postId: string, limit = 20) {
 
 export async function fetchPostReplies(postId: string, limit = 20) {
   return request<SocialPost[]>(`/social/posts/${postId}/replies?limit=${limit}`);
+}
+
+export async function deletePost(postId: string) {
+  return request<{ deleted: boolean; id: string }>(`/social/posts/${postId}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function bookmarkPost(postId: string) {
+  return request<SocialPost>(`/social/posts/${postId}/bookmark`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function unbookmarkPost(postId: string) {
+  return request<SocialPost>(`/social/posts/${postId}/bookmark`, {
+    method: 'DELETE',
+  });
 }
 
 export async function createConversationMessage(conversationId: string, payload: CreateMessageRequest) {

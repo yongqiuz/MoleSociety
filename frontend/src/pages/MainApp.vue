@@ -3,9 +3,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import 'emoji-picker-element';
 import {
+  bookmarkPost,
   createConversation,
   createConversationMessage,
   createMediaAsset,
+  deletePost as deletePostApi,
   createPost,
   fetchPostReplies,
   fetchPostThread,
@@ -17,6 +19,7 @@ import {
   getConversation,
   listConversations,
   unfollowUser,
+  unbookmarkPost,
   updateUserProfile,
   voteOnPoll,
   type BootstrapPayload,
@@ -31,7 +34,7 @@ import { ApiError } from '../api/apiError';
 import { useAuth } from '../composables/useAuth';
 import type { Component } from 'vue';
 import {
-  Home, Compass, Bell, List, Hash, Star, Bookmark, AtSign, Settings,
+  Home, Compass, Bell, Hash, Star, Bookmark, AtSign, Settings,
   MoreHorizontal, User, Shield, PenTool, Mail, AlignJustify, Users,
   Filter, Trash2, Image as ImageIcon, CheckSquare, Smile, Search,
   ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
@@ -54,8 +57,7 @@ type Section =
   | 'mentions'
   | 'followers'
   | 'following'
-  | 'preferences'
-  | 'more';
+  | 'preferences';
 
 type ExploreTab = 'posts' | 'topics' | 'users' | 'news';
 
@@ -101,6 +103,7 @@ type FeedCard = {
     replies: number;
     boosts: number;
     likes: number;
+    bookmarks: number;
   };
   interaction: string;
   poll?: Poll;
@@ -130,6 +133,7 @@ type MessageCard = {
   from: 'me' | 'peer';
   text: string;
   time: string;
+  createdAt?: string;
   forwardedPost?: {
     id: string;
     author: string;
@@ -179,8 +183,8 @@ const primaryNavItems: { label: string; key: Section; icon: Component }[] = [
 ];
 
 const secondaryNavItems: { label: string; key: Section; icon: Component }[] = [
-  { label: '列表', key: 'lists', icon: List },
-  { label: '关注的话题', key: 'topics', icon: Hash },
+  { label: '联邦切换', key: 'lists', icon: Globe },
+  { label: '话题', key: 'topics', icon: Hash },
   { label: '喜欢', key: 'likes', icon: Star },
   { label: '书签', key: 'bookmarks', icon: Bookmark },
   { label: '提及', key: 'mentions', icon: AtSign },
@@ -188,7 +192,6 @@ const secondaryNavItems: { label: string; key: Section; icon: Component }[] = [
 
 const utilityNavItems: { label: string; key: Section; icon: Component }[] = [
   { label: '偏好设置', key: 'preferences', icon: Settings },
-  { label: '更多', key: 'more', icon: MoreHorizontal },
 ];
 
 // settingsMenu removed - moved to SettingsPage.vue
@@ -207,7 +210,7 @@ const showTagPicker = ref(false);
 const showEmojiPicker = ref(false);
 const selectedPostTags = ref<string[]>([]);
 const customTagInput = ref('');
-const defaultTagOptions = ['创作者动态', '联邦社交', '产品更新', '技术分享', '问答', '公告'];
+const defaultTagOptions = ['二次元', '游戏', '影视'];
 const recentPostTags = ref<string[]>([]);
 const pollOptions = ref(['', '']);
 const pollExpiresIn = ref(1440); // 1 day
@@ -215,6 +218,7 @@ const pollMultiple = ref(false);
 const messageDraft = ref('');
 const searchQuery = ref('');
 const selectedConversationId = ref('');
+const selectedTopicTag = ref('');
 const mediaPreview = ref<string | null>(null);
 const mediaMeta = ref<{ name: string; sizeLabel: string; type: string; sizeBytes: number } | null>(null);
 const replyDraft = ref('');
@@ -232,8 +236,10 @@ const showForwardDialog = ref(false);
 const forwardingPost = ref<FeedCard | null>(null);
 const forwardingConversationId = ref('');
 const forwarding = ref(false);
+const showDeletePostDialog = ref(false);
+const deletingPost = ref<FeedCard | null>(null);
+const deletingPostLoading = ref(false);
 const selectedInstanceName = ref('all');
-const showInstanceDropdown = ref(false);
 const selectedPostId = ref('');
 const threadLoading = ref(false);
 const threadError = ref('');
@@ -252,6 +258,7 @@ const replyFileInputRef = ref<HTMLInputElement | null>(null);
 const postComposerRef = ref<HTMLTextAreaElement | null>(null);
 const emojiPickerPanelRef = ref<HTMLElement | null>(null);
 const emojiTriggerRef = ref<HTMLElement | null>(null);
+const emojiPickerFloatingStyle = ref<Record<string, string>>({});
 const postSelectionStart = ref(0);
 const postSelectionEnd = ref(0);
 const replySelectionStart = ref(0);
@@ -265,6 +272,7 @@ const relationUsers = ref<SocialUser[]>([]);
 const relationLoading = ref(false);
 const relationError = ref('');
 const followActionLoading = ref<Record<string, boolean>>({});
+const bookmarkActionLoading = ref<Record<string, boolean>>({});
 
 const threadedReplies = computed(() => {
   const root = threadFocusPost.value;
@@ -362,7 +370,7 @@ const { session: authSession } = useAuth();
 const MAX_POST_LENGTH = 500;
 const MAX_POST_TAGS = 5;
 const MAX_TAG_LENGTH = 24;
-const RECENT_TAGS_STORAGE_KEY = 'mole-compose-recent-tags';
+const RECENT_TAGS_STORAGE_KEY_PREFIX = 'mole-compose-recent-tags';
 const POSTING_PRIVACY_STORAGE_KEY = 'mole-posting-privacy-settings';
 const PRIVACY_SETTINGS_STORAGE_KEY = 'mole-privacy-settings';
 const PULL_MAX_DISTANCE = 120;
@@ -372,6 +380,8 @@ const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
 const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
 const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
 const MENTION_READ_STORAGE_PREFIX = 'mole-mention-read';
+const FOLLOWER_SEEN_IDS_STORAGE_PREFIX = 'mole-follower-seen-ids';
+const MESSAGE_READ_AT_STORAGE_PREFIX = 'mole-message-read-at';
 
 const isLoggedIn = computed(() => !!authSession.value);
 const isReplyingRoot = computed(() => !!threadFocusPost.value && activeReplyTarget.value?.id === threadFocusPost.value.id);
@@ -444,6 +454,55 @@ async function handleMenuAction(action: string, post: FeedCard) {
       errorMessage.value = '复制链接失败，请稍后重试。';
     }
     return;
+  }
+  if (action === 'delete') {
+    requestDeletePost(post);
+    return;
+  }
+}
+
+function requestDeletePost(post: FeedCard) {
+  if (!currentUser.value || post.authorId !== currentUser.value.id) {
+    errorMessage.value = '只能删除自己发布的帖子。';
+    return;
+  }
+  deletingPost.value = post;
+  showDeletePostDialog.value = true;
+}
+
+function cancelDeletePost() {
+  if (deletingPostLoading.value) return;
+  showDeletePostDialog.value = false;
+  deletingPost.value = null;
+}
+
+async function confirmDeletePost() {
+  if (!deletingPost.value || deletingPostLoading.value) return;
+  deletingPostLoading.value = true;
+  const target = deletingPost.value;
+  try {
+    await deletePostApi(target.id);
+    const drop = (list: FeedCard[]) => list.filter((item) => item.id !== target.id);
+    posts.value = drop(posts.value);
+    myPosts.value = drop(myPosts.value);
+    threadAncestors.value = drop(threadAncestors.value);
+    threadReplies.value = drop(threadReplies.value);
+    if (threadFocusPost.value?.id === target.id) {
+      threadFocusPost.value = null;
+      currentSection.value = 'home';
+    }
+    const nextLiked = { ...likedPosts.value };
+    delete nextLiked[target.id];
+    likedPosts.value = nextLiked;
+    const nextBookmarked = { ...bookmarkedPosts.value };
+    delete nextBookmarked[target.id];
+    bookmarkedPosts.value = nextBookmarked;
+    showDeletePostDialog.value = false;
+    deletingPost.value = null;
+  } catch {
+    errorMessage.value = '删除失败，请稍后重试。';
+  } finally {
+    deletingPostLoading.value = false;
   }
 }
 
@@ -520,6 +579,22 @@ const timeline = computed(() => {
   );
 });
 
+function postCreatedAtTs(post: FeedCard) {
+  if (!post.createdAt) return 0;
+  const ts = Date.parse(post.createdAt);
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+const exploreTimeline = computed(() =>
+  [...timeline.value].sort((a, b) => {
+    const likeDelta = (b.stats.likes || 0) - (a.stats.likes || 0);
+    if (likeDelta !== 0) return likeDelta;
+    const bookmarkDelta = (b.stats.bookmarks || 0) - (a.stats.bookmarks || 0);
+    if (bookmarkDelta !== 0) return bookmarkDelta;
+    return postCreatedAtTs(b) - postCreatedAtTs(a);
+  }),
+);
+
 const selectedInstance = computed(() =>
   instances.value.find((instance) => instance.name === selectedInstanceName.value) ?? null,
 );
@@ -531,13 +606,12 @@ const activeProfileInstanceName = computed(() =>
 );
 
 const homeTimeline = computed(() => {
-  if (selectedInstanceName.value === 'all') return timeline.value;
-  return timeline.value.filter((post) => post.instance === selectedInstanceName.value);
+  if (selectedInstanceName.value === 'all') return myTimeline.value;
+  return myTimeline.value.filter((post) => post.instance === selectedInstanceName.value);
 });
 
 async function selectInstance(name: string) {
   selectedInstanceName.value = name;
-  showInstanceDropdown.value = false;
   if (name === 'all') return;
   if (!currentUser.value) return;
   if (!apiOnline.value) {
@@ -559,10 +633,6 @@ async function selectInstance(name: string) {
     }
     goToNotFound();
   }
-}
-
-function toggleInstanceDropdown() {
-  showInstanceDropdown.value = !showInstanceDropdown.value;
 }
 
 const recommendedPeople = computed(() => {
@@ -592,7 +662,7 @@ const trendingTags = computed(() => {
 });
 
 const availablePostTags = computed(() => {
-  const pool = [...defaultTagOptions, ...recentPostTags.value, ...trendingTags.value.map((item) => item.tag)];
+  const pool = [...defaultTagOptions, ...recentPostTags.value];
   return [...new Set(pool.map((tag) => tag.trim()).filter(Boolean))];
 });
 
@@ -614,7 +684,7 @@ const currentSectionInfo = computed(() => {
     return { label: '我的内容', icon: User };
   }
   
-  return { label: '更多', icon: MoreHorizontal };
+  return { label: '主页', icon: Home };
 });
 
 const likedTimeline = computed(() => posts.value.filter((post) => likedPosts.value[post.id]));
@@ -624,6 +694,7 @@ const bookmarkedTimeline = computed(() => posts.value.filter((post) => bookmarke
 const notificationItems = computed(() => {
   const mentionEvents = currentUser.value
     ? posts.value
+        .filter((post) => post.authorId !== currentUser.value?.id)
         .filter(isPostMentioningCurrentUser)
         .slice(0, 5)
         .map((post) => ({
@@ -635,20 +706,11 @@ const notificationItems = computed(() => {
         }))
     : [];
 
-  const suggestedUsers = recommendedPeople.value.slice(0, 2).map((person) => {
-    const hasPublished = posts.value.some((post) => post.authorId === person.id);
-    return {
-      id: `follow-${person.id}`,
-      title: `${person.displayName} 开始在社区活跃`,
-      body: hasPublished
-        ? `${formatHandleInstance(person.handle, person.instance)} 已发布动态，适合加入你的关注流。`
-        : `${formatHandleInstance(person.handle, person.instance)} 刚加入社区，欢迎关注。`,
-      time: '刚刚',
-      sortAt: 0,
-    };
-  });
-
-  const postEvents = timeline.value.slice(0, 2).map((post) => ({
+  const postEvents = timeline.value
+    .filter((post) => post.authorId !== currentUser.value?.id)
+    .filter((post) => Boolean(followedUsers.value[post.authorId]))
+    .slice(0, 2)
+    .map((post) => ({
     id: `post-${post.id}`,
     title: `${post.author} 发布了新内容`,
     body: post.content,
@@ -656,40 +718,134 @@ const notificationItems = computed(() => {
     sortAt: post.createdAt ? new Date(post.createdAt).getTime() : 0,
   }));
 
-  return [...mentionEvents, ...suggestedUsers, ...postEvents];
+  const messageEvents = conversations.value
+    .flatMap((conversation) => {
+      const latestPeerMessage = [...conversation.messages]
+        .filter((message) => message.from === 'peer')
+        .sort((a, b) => {
+          const left = a.createdAt ? Date.parse(a.createdAt) : 0;
+          const right = b.createdAt ? Date.parse(b.createdAt) : 0;
+          return right - left;
+        })[0];
+      if (!latestPeerMessage) return [];
+      return [{
+        id: `message-${conversation.id}-${latestPeerMessage.id}`,
+        title: `${conversation.name} 给你发了消息`,
+        body: latestPeerMessage.forwardedPost
+          ? forwardedSummaryText(latestPeerMessage.forwardedPost, 'peer')
+          : latestPeerMessage.text,
+        time: latestPeerMessage.time || '刚刚',
+        sortAt: latestPeerMessage.createdAt ? Date.parse(latestPeerMessage.createdAt) : 0,
+      }];
+    })
+    .slice(0, 5);
+
+  const welcomeEvent = currentUser.value
+    ? [{
+        id: `welcome-${currentUser.value.id}`,
+        title: '欢迎来到鼹鼠社区',
+        body: '这里是一个去中心化社区，你可以在这里畅所欲言',
+        time: '刚刚',
+        sortAt: 0,
+      }]
+    : [];
+
+  return [...welcomeEvent, ...followerNotifications.value, ...messageEvents, ...mentionEvents, ...postEvents];
 });
 
 const orderedNotificationItems = computed(() =>
   [...notificationFeed.value].sort((a, b) => b.sortAt - a.sortAt),
 );
 
-const curatedLists = computed(() => [
-  {
-    id: 'list-creators',
-    title: '链上创作者',
-    summary: '关注独立创作者、长期写作者和内容档案馆。',
-    count: `${recommendedPeople.value.length} 位成员`,
-  },
-  {
-    id: 'list-readers',
-    title: '阅读与知识节点',
-    summary: '聚合阅读社群、图书馆节点和内容策展者。',
-    count: `${instances.value.length} 个实例`,
-  },
-  {
-    id: 'list-archives',
-    title: '永久存储观察',
-    summary: '跟踪媒体上链、归档状态和内容留存趋势。',
-    count: `${assets.value.length} 个资源`,
-  },
-]);
+function normalizeTopicTag(raw: string) {
+  return String(raw || '').replace(/#/g, '').trim();
+}
 
-const followedTopicCards = computed(() =>
-  trendingTags.value.map((item) => ({
-    ...item,
-    summary: timeline.value.find((post) => post.tags.includes(item.tag))?.content ?? '正在汇聚新的讨论内容。',
-  })),
-);
+function extractContentTopicTags(content: string) {
+  const text = String(content || '');
+  const tags: string[] = [];
+  const wrapped = text.match(/#([^#\s]{1,24})#/g) || [];
+  wrapped.forEach((item) => {
+    const cleaned = normalizeTopicTag(item);
+    if (cleaned) tags.push(cleaned);
+  });
+  const loose = text.match(/(^|\s)#([^\s#]{1,24})/g) || [];
+  loose.forEach((item) => {
+    const cleaned = normalizeTopicTag(item);
+    if (cleaned) tags.push(cleaned);
+  });
+  return tags;
+}
+
+const followedTopicCards = computed(() => {
+  const now = Date.now();
+  const bucket = new Map<string, { count: number; latestAt: number; mineCount: number; mineLatestAt: number }>();
+  for (const post of posts.value) {
+    const tags = [
+      ...(Array.isArray(post.tags) ? post.tags : []),
+      ...extractContentTopicTags(post.content),
+    ].map(normalizeTopicTag).filter(Boolean);
+    if (!tags.length) continue;
+    const createdAt = post.createdAt ? Date.parse(post.createdAt) : 0;
+    const isMine = Boolean(currentUser.value?.id && post.authorId === currentUser.value.id);
+    for (const tag of tags) {
+      const prev = bucket.get(tag) || { count: 0, latestAt: 0, mineCount: 0, mineLatestAt: 0 };
+      bucket.set(tag, {
+        count: prev.count + 1,
+        latestAt: Math.max(prev.latestAt, Number.isNaN(createdAt) ? 0 : createdAt),
+        mineCount: prev.mineCount + (isMine ? 1 : 0),
+        mineLatestAt: isMine ? Math.max(prev.mineLatestAt, Number.isNaN(createdAt) ? 0 : createdAt) : prev.mineLatestAt,
+      });
+    }
+  }
+
+  const ranked = [...bucket.entries()]
+    .map(([tag, stat]) => {
+      const hours = stat.latestAt > 0 ? Math.max(1, (now - stat.latestAt) / 3600000) : 9999;
+      const freshness = 24 / Math.min(24, hours);
+      const mineHours = stat.mineLatestAt > 0 ? Math.max(1, (now - stat.mineLatestAt) / 3600000) : 9999;
+      const mineFreshness = stat.mineLatestAt > 0 ? 12 / Math.min(24, mineHours) : 0;
+      const mineBoost = stat.mineCount > 0 ? 25 + stat.mineCount * 8 + mineFreshness : 0;
+      const score = stat.count * 10 + freshness + mineBoost;
+      const cleanTag = normalizeTopicTag(tag);
+      return { tag: cleanTag, label: cleanTag || '未命名话题', score, mineCount: stat.mineCount };
+    })
+    .filter((item) => item.tag.length > 0)
+    .sort((a, b) => {
+      if (a.mineCount > 0 && b.mineCount === 0) return -1;
+      if (a.mineCount === 0 && b.mineCount > 0) return 1;
+      return b.score - a.score;
+    })
+    .slice(0, 24);
+
+  return ranked;
+});
+
+const topicTimeline = computed(() => {
+  const tag = normalizeTopicTag(selectedTopicTag.value);
+  if (!tag) return [];
+  return timeline.value.filter((post) => {
+    const tags = [
+      ...(Array.isArray(post.tags) ? post.tags : []),
+      ...extractContentTopicTags(post.content),
+    ].map(normalizeTopicTag);
+    return tags.includes(tag);
+  });
+});
+
+function openTopicTagFeed(tag: string) {
+  selectedTopicTag.value = String(tag || '').trim();
+}
+
+function clearTopicTagFeed() {
+  selectedTopicTag.value = '';
+}
+
+function backToExploreTop() {
+  selectedTopicTag.value = '';
+  activeExploreTab.value = 'posts';
+  setSection('explore');
+}
 
 function escapeRegex(input: string) {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -729,6 +885,31 @@ const unreadMentionCount = computed(() =>
   mentionItems.value.filter((item) => !readMentionIds.value[item.id]).length,
 );
 
+function latestPeerMessageTimestamp(conversation: ConversationCard) {
+  const latest = [...conversation.messages]
+    .filter((message) => message.from === 'peer')
+    .sort((a, b) => {
+      const left = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const right = b.createdAt ? Date.parse(b.createdAt) : 0;
+      return right - left;
+    })[0];
+  if (!latest) return 0;
+  if (latest.createdAt) {
+    const ts = Date.parse(latest.createdAt);
+    if (!Number.isNaN(ts)) return ts;
+  }
+  return 0;
+}
+
+const unreadConversationCount = computed(() =>
+  conversations.value.filter((conversation) => {
+    const latestPeerTs = latestPeerMessageTimestamp(conversation);
+    if (!latestPeerTs) return false;
+    const readAtTs = readConversationAt.value[conversation.id] || 0;
+    return latestPeerTs > readAtTs;
+  }).length,
+);
+
 function markNotificationsAsRead() {
   if (orderedNotificationItems.value.length === 0) return;
   const next = { ...readNotificationIds.value };
@@ -749,23 +930,18 @@ function markMentionsAsRead() {
   persistReadState();
 }
 
-const moreCards = computed(() => [
-  {
-    id: 'chat',
-    title: '会话聊天',
-    description: `${conversations.value.length} 个会话正在使用中，后续会继续并入私密沟通入口。`,
-  },
-  {
-    id: 'media',
-    title: '媒体资源',
-    description: `${assets.value.length} 个资源已进入存储面板，可继续扩展到对象存储与永久归档。`,
-  },
-  {
-    id: 'federation',
-    title: '联邦实例',
-    description: `${instances.value.length} 个实例已接入展示，用于跨社区发现与联邦观察。`,
-  },
-]);
+function markConversationAsRead(conversationId: string) {
+  const conversation = conversations.value.find((item) => item.id === conversationId);
+  if (!conversation) return;
+  const latestPeerTs = latestPeerMessageTimestamp(conversation);
+  const seenAt = latestPeerTs || Date.now();
+  if ((readConversationAt.value[conversationId] || 0) >= seenAt) return;
+  readConversationAt.value = {
+    ...readConversationAt.value,
+    [conversationId]: seenAt,
+  };
+  persistReadState();
+}
 
 // themeStyles moved to composable
 
@@ -788,8 +964,34 @@ function toggleLike(postId: string) {
   likedPosts.value = { ...likedPosts.value, [postId]: !likedPosts.value[postId] };
 }
 
-function toggleBookmark(postId: string) {
-  bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: !bookmarkedPosts.value[postId] };
+function applyUpdatedPostEverywhere(updatedPost: SocialPost) {
+  const card = toFeedCard(updatedPost);
+  posts.value = posts.value.map((item) => (item.id === card.id ? card : item));
+  myPosts.value = myPosts.value.map((item) => (item.id === card.id ? card : item));
+  threadAncestors.value = threadAncestors.value.map((item) => (item.id === card.id ? card : item));
+  threadReplies.value = threadReplies.value.map((item) => (item.id === card.id ? card : item));
+  if (threadFocusPost.value?.id === card.id) {
+    threadFocusPost.value = card;
+  }
+}
+
+async function toggleBookmark(postId: string) {
+  if (!postId || bookmarkActionLoading.value[postId]) return;
+  const next = !bookmarkedPosts.value[postId];
+  bookmarkActionLoading.value = { ...bookmarkActionLoading.value, [postId]: true };
+  try {
+    const updated = next ? await bookmarkPost(postId) : await unbookmarkPost(postId);
+    bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: next };
+    applyUpdatedPostEverywhere(updated);
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '收藏操作失败，请稍后重试。';
+  } finally {
+    bookmarkActionLoading.value = { ...bookmarkActionLoading.value, [postId]: false };
+  }
 }
 
 function likeStorageKey() {
@@ -846,15 +1048,31 @@ function mentionReadStorageKey() {
   return userId ? `${MENTION_READ_STORAGE_PREFIX}:${userId}` : '';
 }
 
+function messageReadAtStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${MESSAGE_READ_AT_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function followerSeenIdsStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${FOLLOWER_SEEN_IDS_STORAGE_PREFIX}:${userId}` : '';
+}
+
 const readNotificationIds = ref<Record<string, boolean>>({});
 const readMentionIds = ref<Record<string, boolean>>({});
+const readConversationAt = ref<Record<string, number>>({});
+const seenFollowerIds = ref<string[]>([]);
+const followerNotifications = ref<NotificationItem[]>([]);
 
 function loadReadState() {
   if (typeof window === 'undefined') return;
   readNotificationIds.value = {};
   readMentionIds.value = {};
+  readConversationAt.value = {};
+  seenFollowerIds.value = [];
   const notificationKey = notificationReadStorageKey();
   const mentionKey = mentionReadStorageKey();
+  const messageReadAtKey = messageReadAtStorageKey();
   if (notificationKey) {
     try {
       readNotificationIds.value = JSON.parse(window.localStorage.getItem(notificationKey) || '{}');
@@ -869,17 +1087,41 @@ function loadReadState() {
       readMentionIds.value = {};
     }
   }
+  if (messageReadAtKey) {
+    try {
+      readConversationAt.value = JSON.parse(window.localStorage.getItem(messageReadAtKey) || '{}');
+    } catch {
+      readConversationAt.value = {};
+    }
+  }
+  const followerSeenKey = followerSeenIdsStorageKey();
+  if (followerSeenKey) {
+    try {
+      const raw = window.localStorage.getItem(followerSeenKey);
+      seenFollowerIds.value = raw ? JSON.parse(raw) : [];
+    } catch {
+      seenFollowerIds.value = [];
+    }
+  }
 }
 
 function persistReadState() {
   if (typeof window === 'undefined') return;
   const notificationKey = notificationReadStorageKey();
   const mentionKey = mentionReadStorageKey();
+  const messageReadAtKey = messageReadAtStorageKey();
   if (notificationKey) {
     window.localStorage.setItem(notificationKey, JSON.stringify(readNotificationIds.value));
   }
   if (mentionKey) {
     window.localStorage.setItem(mentionKey, JSON.stringify(readMentionIds.value));
+  }
+  if (messageReadAtKey) {
+    window.localStorage.setItem(messageReadAtKey, JSON.stringify(readConversationAt.value));
+  }
+  const followerSeenKey = followerSeenIdsStorageKey();
+  if (followerSeenKey) {
+    window.localStorage.setItem(followerSeenKey, JSON.stringify(seenFollowerIds.value));
   }
 }
 
@@ -928,6 +1170,34 @@ function parseForwardedPostBody(text: string) {
   } catch {
     return null;
   }
+}
+
+function forwardedSummaryText(forwardedPost: MessageCard['forwardedPost'], from: 'me' | 'peer') {
+  if (!forwardedPost) return '';
+  const actor = from === 'me' ? '你' : '对方';
+  const sourcePost = posts.value.find((item) => item.id === forwardedPost.id)
+    || myPosts.value.find((item) => item.id === forwardedPost.id)
+    || threadAncestors.value.find((item) => item.id === forwardedPost.id)
+    || threadReplies.value.find((item) => item.id === forwardedPost.id)
+    || (threadFocusPost.value?.id === forwardedPost.id ? threadFocusPost.value : null);
+  const byHandle = people.value.find((person) => person.handle === forwardedPost.handle)
+    || (currentUser.value?.handle === forwardedPost.handle ? currentUser.value : null);
+  const owner = sourcePost?.author || byHandle?.displayName || forwardedPost.author || '某用户';
+  const raw = String(forwardedPost.content || '').trim();
+  const brief = raw.length > 36 ? `${raw.slice(0, 36)}...` : raw || '帖子';
+  return `${actor}转发了${owner}的《${brief}》`;
+}
+
+function forwardedPostAuthorName(forwardedPost: MessageCard['forwardedPost']) {
+  if (!forwardedPost) return '某用户';
+  const sourcePost = posts.value.find((item) => item.id === forwardedPost.id)
+    || myPosts.value.find((item) => item.id === forwardedPost.id)
+    || threadAncestors.value.find((item) => item.id === forwardedPost.id)
+    || threadReplies.value.find((item) => item.id === forwardedPost.id)
+    || (threadFocusPost.value?.id === forwardedPost.id ? threadFocusPost.value : null);
+  const byHandle = people.value.find((person) => person.handle === forwardedPost.handle)
+    || (currentUser.value?.handle === forwardedPost.handle ? currentUser.value : null);
+  return sourcePost?.author || byHandle?.displayName || forwardedPost.author || '某用户';
 }
 
 function openForwardedPostDetail(message: MessageCard) {
@@ -1081,6 +1351,7 @@ function toFeedCard(post: SocialPost): FeedCard {
       replies: post.replies,
       boosts: post.boosts,
       likes: post.likes,
+      bookmarks: post.bookmarks || 0,
     },
     poll: post.poll,
   };
@@ -1140,18 +1411,23 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     backgroundUrl: fallbackPeer?.backgroundUrl,
     avatarLabel: avatarText(resolvedTitle),
     participantId: fallbackPeer?.id,
-    messages: conversation.messages.map((message) => ({
+    messages: conversation.messages.map((message) => {
+      const from: 'me' | 'peer' = message.senderId === userId ? 'me' : 'peer';
+      const forwardedPost = parseForwardedPostBody(message.body);
+      return {
       id: message.id,
-      from: message.senderId === userId ? 'me' : 'peer',
-      text: message.body,
-      forwardedPost: parseForwardedPostBody(message.body),
+      from,
+      text: forwardedPost ? forwardedSummaryText(forwardedPost, from) : message.body,
+      forwardedPost,
       time: formatTimestamp(message.createdAt),
+      createdAt: message.createdAt,
       assetUri: message.assetUri,
       chainId: message.chainId,
       txHash: message.txHash,
       contractAddress: message.contractAddress,
       explorerUrl: message.explorerUrl,
-    })),
+      };
+    }),
   };
 }
 
@@ -1167,9 +1443,25 @@ function syncNotificationFeed() {
     .slice(0, 200);
 }
 
+function conversationLatestAt(conversation: ConversationCard) {
+  const latest = conversation.messages[conversation.messages.length - 1];
+  if (!latest?.createdAt) return 0;
+  const ts = Date.parse(latest.createdAt);
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function sortConversationsByLatestMessage(items: ConversationCard[]) {
+  return [...items].sort((a, b) => {
+    const delta = conversationLatestAt(b) - conversationLatestAt(a);
+    if (delta !== 0) return delta;
+    return b.id.localeCompare(a.id);
+  });
+}
+
 function upsertConversation(conversation: ConversationCard) {
+  if (!conversation.participantId || conversation.participantId === currentUser.value?.id) return;
   const remaining = conversations.value.filter((item) => item.id !== conversation.id);
-  conversations.value = [conversation, ...remaining];
+  conversations.value = sortConversationsByLatestMessage([conversation, ...remaining]);
 }
 
 async function scrollMessagesToBottom() {
@@ -1201,8 +1493,10 @@ async function refreshConversations(keepSelection = true) {
   if (!apiOnline.value) return;
   try {
     const items = await listConversations(50);
-    const mapped = items.map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null));
-    conversations.value = mapped;
+    const mapped = items
+      .map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null))
+      .filter((conversation) => conversation.participantId && conversation.participantId !== currentUser.value?.id);
+    conversations.value = sortConversationsByLatestMessage(mapped);
     if (!keepSelection || !selectedConversationId.value) {
       selectedConversationId.value = conversations.value[0]?.id ?? '';
     } else if (!conversations.value.find((item) => item.id === selectedConversationId.value)) {
@@ -1215,7 +1509,9 @@ async function refreshConversations(keepSelection = true) {
 
 async function openConversation(conversationId: string) {
   selectedConversationId.value = conversationId;
+  markConversationAsRead(conversationId);
   await loadConversationMessages(conversationId);
+  markConversationAsRead(conversationId);
 }
 
 function findDirectConversationWith(userId: string) {
@@ -1274,12 +1570,13 @@ function applyBootstrap(payload: BootstrapPayload) {
   people.value = payload.users;
   posts.value = hydrateFeedCardList(payload.feed.map(toFeedCard));
   assets.value = payload.media.map(toAssetCard);
-  const mappedConversations = payload.conversations.map((conversation) =>
-    toConversationCard(conversation, currentUser.value?.id ?? null),
-  );
-  conversations.value = mappedConversations;
+  const mappedConversations = payload.conversations
+    .map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null))
+    .filter((conversation) => conversation.participantId && conversation.participantId !== currentUser.value?.id);
+  conversations.value = sortConversationsByLatestMessage(mappedConversations);
   instances.value = payload.instances;
   selectedConversationId.value = conversations.value[0]?.id ?? '';
+  void syncFollowerNotifications();
 }
 
 watch([people, currentUser], () => {
@@ -1801,6 +2098,33 @@ async function openRelationSection(type: 'followers' | 'following') {
   await loadRelationUsers(type);
 }
 
+async function syncFollowerNotifications() {
+  if (!currentUser.value?.id || !apiOnline.value) return;
+  try {
+    const followers = await fetchUserFollowers(currentUser.value.id, 200);
+    const currentIds = new Set(followers.map((item) => item.id));
+    const seenIds = new Set(seenFollowerIds.value);
+    const newFollowers = followers.filter((item) => !seenIds.has(item.id));
+
+    if (newFollowers.length > 0) {
+      const now = Date.now();
+      const newItems = newFollowers.map((item, idx) => ({
+        id: `follow-${item.id}-${now}-${idx}`,
+        title: `${item.displayName} 关注了你`,
+        body: `${formatHandleInstance(item.handle, item.instance)} 刚刚关注了你`,
+        time: '刚刚',
+        sortAt: now - idx,
+      }));
+      followerNotifications.value = [...newItems, ...followerNotifications.value].slice(0, 20);
+    }
+
+    seenFollowerIds.value = [...currentIds];
+    persistReadState();
+  } catch {
+    // ignore follower notification sync errors
+  }
+}
+
 async function toggleFollowRelationUser(userId: string) {
   if (!userId || followActionLoading.value[userId]) return;
   followActionLoading.value = { ...followActionLoading.value, [userId]: true };
@@ -1866,10 +2190,20 @@ function removePostTag(tag: string) {
   selectedPostTags.value = selectedPostTags.value.filter((item) => item !== tag);
 }
 
+function recentTagsStorageKey() {
+  const userId = authSession.value?.id || currentUser.value?.id || '';
+  return userId ? `${RECENT_TAGS_STORAGE_KEY_PREFIX}:${userId}` : '';
+}
+
 function loadRecentPostTags() {
   if (typeof window === 'undefined') return;
+  const key = recentTagsStorageKey();
+  if (!key) {
+    recentPostTags.value = [];
+    return;
+  }
   try {
-    const raw = window.localStorage.getItem(RECENT_TAGS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return;
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return;
@@ -1884,7 +2218,9 @@ function loadRecentPostTags() {
 
 function persistRecentPostTags() {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(RECENT_TAGS_STORAGE_KEY, JSON.stringify(recentPostTags.value));
+  const key = recentTagsStorageKey();
+  if (!key) return;
+  window.localStorage.setItem(key, JSON.stringify(recentPostTags.value));
 }
 
 function updateRecentTags(tags: string[]) {
@@ -1912,7 +2248,28 @@ function toggleEmojiPicker() {
   showEmojiPicker.value = !showEmojiPicker.value;
   if (showEmojiPicker.value) {
     syncPostCursor();
+    void nextTick(updateEmojiPickerFloatingPosition);
   }
+}
+
+function updateEmojiPickerFloatingPosition() {
+  if (!showEmojiPicker.value || !emojiTriggerRef.value || typeof window === 'undefined') return;
+  const rect = emojiTriggerRef.value.getBoundingClientRect();
+  const panelWidth = Math.min(352, window.innerWidth - 16);
+  const desiredLeft = rect.right - panelWidth;
+  const left = Math.max(8, Math.min(desiredLeft, window.innerWidth - panelWidth - 8));
+  const maxHeight = Math.min(420, Math.floor(window.innerHeight * 0.55));
+  let top = rect.top - maxHeight - 10;
+  if (top < 8) {
+    top = Math.min(window.innerHeight - maxHeight - 8, rect.bottom + 10);
+  }
+  emojiPickerFloatingStyle.value = {
+    position: 'fixed',
+    left: `${left}px`,
+    top: `${Math.max(8, top)}px`,
+    width: `${panelWidth}px`,
+    maxHeight: `${maxHeight}px`,
+  };
 }
 
 async function insertEmojiAtCursor(emoji: string) {
@@ -2039,7 +2396,9 @@ async function publishPost() {
       pollExpiresIn: showPollEditor.value ? pollExpiresIn.value : 0,
       pollMultiple: showPollEditor.value ? pollMultiple.value : false,
     });
-    posts.value = [toFeedCard(createdPost), ...posts.value];
+    const nextCard = toFeedCard(createdPost);
+    posts.value = [nextCard, ...posts.value];
+    myPosts.value = [nextCard, ...myPosts.value];
     errorMessage.value = '';
 
     postDraft.value = '';
@@ -2162,10 +2521,14 @@ onMounted(() => {
   loadInteractionState();
   loadReadState();
   document.addEventListener('click', handleDocumentClick);
+  window.addEventListener('resize', updateEmojiPickerFloatingPosition);
+  window.addEventListener('scroll', updateEmojiPickerFloatingPosition, true);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
+  window.removeEventListener('resize', updateEmojiPickerFloatingPosition);
+  window.removeEventListener('scroll', updateEmojiPickerFloatingPosition, true);
 });
 
 watch(
@@ -2174,16 +2537,30 @@ watch(
     if (section !== 'messages') return;
     void refreshConversations(true);
     if (selectedConversationId.value) {
+      markConversationAsRead(selectedConversationId.value);
       void loadConversationMessages(selectedConversationId.value);
     }
   },
 );
 
 watch(
+  () => selectedConversationId.value,
+  (conversationId) => {
+    if (!conversationId) return;
+    if (currentSection.value !== 'messages') return;
+    markConversationAsRead(conversationId);
+  },
+);
+
+watch(
   () => authSession.value?.id,
   () => {
+    conversations.value = [];
+    selectedConversationId.value = '';
+    messageDraft.value = '';
     loadInteractionState();
     loadReadState();
+    loadRecentPostTags();
   },
 );
 
@@ -2237,7 +2614,7 @@ watch(
       </div>
 
       <div v-if="!loading" class="grid gap-0 overflow-visible lg:h-[calc(100vh-24px)] lg:grid-cols-[260px_minmax(0,1fr)_240px]">
-        <aside class="relative z-[80] min-h-0 max-h-[calc(100vh-24px)] overflow-hidden border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:max-h-none lg:border-b-0 lg:border-r">
+        <aside class="relative z-[80] min-h-0 max-h-[calc(100vh-24px)] overflow-visible border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:max-h-none lg:border-b-0 lg:border-r">
           <div class="max-h-[calc(100vh-24px)] min-h-0 space-y-3 overflow-y-auto overscroll-contain p-4 no-scrollbar lg:h-full lg:max-h-none">
             <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-4">
               <input
@@ -2248,19 +2625,25 @@ watch(
             </div>
 
             <div
-              class="relative flex items-center gap-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-3"
+              class="relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-gradient-to-r from-emerald-300/40 via-cyan-300/30 to-blue-300/40 px-3 py-3"
               :style="currentUser?.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${currentUser.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
+              @click="currentUser?.id && goToUserProfile(currentUser.id)"
             >
-              <div v-if="!currentUser?.backgroundUrl" class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100" />
+              <button
+                type="button"
+                class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100"
+                title="查看我的主页"
+                @click.stop="currentUser?.id && goToUserProfile(currentUser.id)"
+              />
               <button
                 @click="currentUser?.id && goToUserProfile(currentUser.id)"
-                class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                class="relative z-10 flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
                 title="查看我的主页"
               >
                 <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
                 <template v-else>{{ avatarText(currentUser?.displayName || 'W') }}</template>
               </button>
-              <div class="min-w-0">
+              <div class="relative z-10 min-w-0">
                 <button
                   @click="currentUser?.id && goToUserProfile(currentUser.id)"
                   class="truncate text-[17px] font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
@@ -2379,7 +2762,7 @@ watch(
                 </div>
               </Transition>
 
-              <div class="mt-4 flex flex-col gap-3">
+              <div class="relative mt-4 flex flex-col gap-3">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2 text-lg text-[color:var(--text-secondary)]">
                     <label class="cursor-pointer transition hover:text-emerald-300 rounded-lg p-1.5 hover:bg-emerald-500/10" title="上传图片或视频">
@@ -2392,10 +2775,10 @@ watch(
                     <button
                       @click="toggleTagPicker"
                       class="rounded-lg p-1.5 transition-colors"
-                      :class="showTagPicker ? 'text-cyan-400 bg-cyan-500/10' : 'hover:bg-cyan-500/10'"
+                      :class="showTagPicker ? 'text-emerald-400 bg-emerald-500/10' : 'hover:bg-emerald-500/10'"
                       title="选择标签"
                     >
-                      <Hash class="w-5 h-5 cursor-pointer transition-transform hover:scale-110" :class="showTagPicker ? 'text-cyan-400' : 'hover:text-cyan-400'" />
+                      <Hash class="w-5 h-5 cursor-pointer transition-transform hover:scale-110" :class="showTagPicker ? 'text-emerald-400' : 'hover:text-emerald-400'" />
                     </button>
                     <button ref="emojiTriggerRef" @click.stop="toggleEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
                       <Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" />
@@ -2407,35 +2790,42 @@ watch(
                   >{{ remainingPostChars }}</span>
                 </div>
 
-                <div v-if="showEmojiPicker" ref="emojiPickerPanelRef" @click.stop class="rounded-2xl border border-yellow-400/20 bg-[var(--panel-bg)] p-2">
+                <div
+                  v-if="showEmojiPicker"
+                  ref="emojiPickerPanelRef"
+                  @click.stop
+                  class="absolute bottom-full right-0 z-[260] mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-yellow-400/25 bg-[var(--panel-bg)] p-2 shadow-[0_20px_50px_rgba(0,0,0,0.38)]"
+                >
                   <emoji-picker @emoji-click="handleEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
                   <div class="mt-2 px-2 text-[11px] text-[color:var(--text-muted)]">点击表情即可插入</div>
                 </div>
 
                 <Transition name="expand">
-                  <div v-if="showTagPicker" class="rounded-2xl border border-cyan-500/25 bg-cyan-500/5 p-4">
+                  <div v-if="showTagPicker" class="rounded-2xl border border-emerald-500/25 bg-emerald-500/5 p-4">
                     <div class="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">选择标签（点击 #XXX，最多 5 个）</div>
-                    <div class="flex flex-wrap gap-2">
+                    <div class="max-h-44 overflow-y-auto pr-1 no-scrollbar">
+                      <div class="flex flex-wrap gap-2">
                       <button
                         v-for="tag in availablePostTags"
                         :key="tag"
                         @click="togglePostTag(tag)"
                         class="rounded-full border px-3 py-1 text-xs font-semibold transition"
-                        :class="selectedPostTags.includes(tag) ? 'border-cyan-400/60 bg-cyan-500/20 text-cyan-300' : 'border-[color:var(--border-color)] bg-[var(--panel-bg)] text-[color:var(--text-secondary)] hover:border-cyan-400/50 hover:text-cyan-300'"
+                        :class="selectedPostTags.includes(tag) ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-300' : 'border-[color:var(--border-color)] bg-[var(--panel-bg)] text-[color:var(--text-secondary)] hover:border-emerald-400/50 hover:text-emerald-300'"
                       >
                         #{{ tag }}
                       </button>
+                      </div>
                     </div>
-                    <div class="mt-3 flex gap-2">
+                    <div class="mt-3 flex flex-wrap gap-2">
                       <input
                         v-model="customTagInput"
                         @keydown.enter.prevent="addCustomTag"
                         placeholder="输入自定义标签，例如 #开发日志"
-                        class="flex-1 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-cyan-400"
+                        class="min-w-0 flex-1 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-2 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-400"
                       />
                       <button
                         @click="addCustomTag"
-                        class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500"
+                        class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
                       >
                         添加
                       </button>
@@ -2448,7 +2838,7 @@ watch(
                     v-for="tag in selectedPostTags"
                     :key="tag"
                     @click="removePostTag(tag)"
-                    class="inline-flex items-center gap-1 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
+                    class="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-500/20"
                     title="点击移除标签"
                   >
                     <span>#{{ tag }}</span>
@@ -2462,46 +2852,6 @@ watch(
                   class="w-full rounded-xl bg-emerald-600 py-2.5 text-[15px] font-bold tracking-wider text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:opacity-50 disabled:hover:translate-y-0"
                 >
                   {{ saving ? '发布中...' : '发 布' }}
-                </button>
-              </div>
-            </div>
-
-            <div v-if="currentSection === 'home'" class="relative z-[120]">
-              <button
-                @click="toggleInstanceDropdown"
-                class="flex w-full items-center justify-between rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-2.5 text-left transition hover:border-emerald-500/50"
-              >
-                <span class="min-w-0">
-                  <span class="block truncate text-sm font-semibold text-[color:var(--text-primary)]">
-                    {{ selectedInstanceName === 'all' ? '全部摩尔实例' : selectedInstanceName }}
-                  </span>
-                  <span class="block whitespace-normal break-words text-xs text-[color:var(--text-muted)]">
-                    {{ selectedInstanceName === 'all' ? `${instances.length} 个实例` : selectedInstance?.focus }}
-                  </span>
-                </span>
-                <ChevronDown class="ml-3 h-4 w-4 shrink-0 text-[color:var(--text-muted)]" />
-              </button>
-              <div
-                v-if="showInstanceDropdown"
-                class="mt-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg,#ffffff)] text-[color:var(--text-primary,#0f172a)] shadow-[0_18px_48px_rgba(0,0,0,0.35)]"
-              >
-                <button
-                  @click="selectInstance('all')"
-                  class="w-full px-4 py-3 text-left transition first:rounded-t-xl hover:bg-[var(--panel-soft)]"
-                  :class="selectedInstanceName === 'all' ? 'text-emerald-400' : 'text-[color:var(--text-primary)]'"
-                >
-                  <span class="block text-sm font-semibold">全部摩尔实例</span>
-                  <span class="block text-xs text-[color:var(--text-muted)]">显示所有首页动态</span>
-                </button>
-                <button
-                  v-for="instance in instances"
-                  :key="instance.name"
-                  @click="selectInstance(instance.name)"
-                  class="w-full px-4 py-3 text-left transition last:rounded-b-xl hover:bg-[var(--panel-soft)]"
-                  :class="selectedInstanceName === instance.name ? 'text-emerald-400' : 'text-[color:var(--text-primary)]'"
-                >
-                  <span class="block text-sm font-semibold">{{ instance.name }}</span>
-                  <span class="block whitespace-normal break-words text-xs text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</span>
                 </button>
               </div>
             </div>
@@ -2549,7 +2899,7 @@ watch(
 
           <section v-if="currentSection === 'home'" class="divide-y divide-[color:var(--border-color)]">
             <div v-if="homeTimeline.length === 0" class="px-6 py-16 text-center text-sm text-[color:var(--text-muted)]">
-              当前实例暂无动态。
+              你还没有发布过摩文哦，快来发布第一条吧
             </div>
             <article v-for="post in homeTimeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex gap-3">
@@ -2612,12 +2962,12 @@ watch(
                       </div>
                     </div>
 
-                    <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                      <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
+                    <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl">
+                      <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full h-auto object-contain" />
                     </div>
 
                     <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
-                      <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
+                      <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-600 px-3 py-1 text-sm font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-500 hover:shadow-emerald-500/25">
                         #{{ tag }}
                       </span>
                     </div>
@@ -2648,7 +2998,7 @@ watch(
                       class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                       :class="bookmarkedPosts[post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                     >
-                      <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                      <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks || '' }}
                     </button>
                     
                     <!-- More Menu Wrapper -->
@@ -2668,6 +3018,13 @@ watch(
                         <div class="py-1">
                           <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
                           <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
+                          <button
+                            v-if="currentUser?.id && post.authorId === currentUser.id"
+                            @click="handleMenuAction('delete', post)"
+                            class="w-full text-left px-4 py-2.5 text-rose-500 hover:bg-rose-500/10"
+                          >
+                            删除帖子
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -2680,11 +3037,11 @@ watch(
           <section v-else-if="currentSection === 'postDetail'" class="min-h-[calc(100vh-140px)]">
             <div class="border-b border-[color:var(--border-color)] px-6 py-4">
               <button
-                @click="setSection('home')"
+                @click="backToExploreTop"
                 class="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-color)] px-4 py-2 text-sm text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
               >
                 <span>←</span>
-                <span>返回主页</span>
+                <span>返回当前热门</span>
               </button>
             </div>
 
@@ -2820,16 +3177,16 @@ watch(
 
                     <div
                       v-if="threadFocusPost.media"
-                      class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]"
+                      class="mt-4 overflow-hidden rounded-2xl"
                     >
-                      <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
+                      <img :src="threadFocusPost.media.preview" :alt="threadFocusPost.media.name" class="max-h-[70vh] w-full h-auto object-contain" />
                     </div>
 
                     <div v-if="threadFocusPost.tags.length" class="mt-4 flex flex-wrap gap-2">
                       <span
                         v-for="tag in threadFocusPost.tags"
                         :key="tag"
-                        class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200"
+                        class="rounded-full bg-emerald-600 px-3 py-1 text-sm font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-500 hover:shadow-emerald-500/25"
                       >
                         #{{ tag }}
                       </span>
@@ -2859,7 +3216,7 @@ watch(
                         class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                         :class="bookmarkedPosts[threadFocusPost.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                       >
-                        <Bookmark :class="{'fill-current': bookmarkedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                        <Bookmark :class="{'fill-current': bookmarkedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.bookmarks || '' }}
                       </button>
                     </div>
                   </div>
@@ -2923,8 +3280,8 @@ watch(
                       </div>
                       <div class="mt-4 flex items-center justify-between gap-4">
                         <div class="flex items-center gap-2">
-                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
-                            <ImageIcon class="w-4 h-4 text-cyan-300" />
+                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-emerald-400/10" title="添加图片">
+                            <ImageIcon class="w-4 h-4 text-emerald-300" />
                             <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                           </label>
                           <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
@@ -2984,6 +3341,16 @@ watch(
                     <div class="mt-3 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
                       {{ group.parent.content }}
                     </div>
+                    <div
+                      v-if="group.parent.media?.preview"
+                      class="mt-3 overflow-hidden rounded-2xl"
+                    >
+                      <img
+                        :src="group.parent.media.preview"
+                        :alt="group.parent.media.name || '回复图片'"
+                        class="max-h-[60vh] w-full h-auto object-contain"
+                      />
+                    </div>
                     <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
                       <button
                         @click="setReplyTarget(group.parent)"
@@ -3010,8 +3377,8 @@ watch(
                       </div>
                       <div class="mt-3 flex items-center justify-between">
                         <div class="flex items-center gap-2">
-                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
-                            <ImageIcon class="w-4 h-4 text-cyan-300" />
+                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-emerald-400/10" title="添加图片">
+                            <ImageIcon class="w-4 h-4 text-emerald-300" />
                             <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                           </label>
                           <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
@@ -3045,6 +3412,16 @@ watch(
                         <div class="mt-2 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
                           <span v-if="child.replyTo" class="mr-1 text-emerald-400">回复 @{{ child.replyTo.author }}：</span>{{ child.post.content }}
                         </div>
+                        <div
+                          v-if="child.post.media?.preview"
+                          class="mt-3 overflow-hidden rounded-2xl"
+                        >
+                          <img
+                            :src="child.post.media.preview"
+                            :alt="child.post.media.name || '回复图片'"
+                            class="max-h-[60vh] w-full h-auto object-contain"
+                          />
+                        </div>
                         <div class="mt-3 flex flex-wrap items-center gap-3 text-sm">
                           <button
                             @click="setReplyTarget(child.post)"
@@ -3071,8 +3448,8 @@ watch(
                           </div>
                           <div class="mt-3 flex items-center justify-between">
                             <div class="flex items-center gap-2">
-                              <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
-                                <ImageIcon class="w-4 h-4 text-cyan-300" />
+                              <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-emerald-400/10" title="添加图片">
+                                <ImageIcon class="w-4 h-4 text-emerald-300" />
                                 <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                               </label>
                               <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
@@ -3110,6 +3487,7 @@ watch(
               :liked="likedPosts[post.id]"
               :bookmarked="bookmarkedPosts[post.id]"
               :current-user-id="currentUser?.id"
+              :mention-users="people"
               :show-more-menu="true"
               :more-menu-open="activeMoreMenuId === post.id"
               @open-profile="goToUserProfile"
@@ -3170,7 +3548,7 @@ watch(
                 <button
                   @click="toggleFollowRelationUser(person.id)"
                   :disabled="followActionLoading[person.id]"
-                  class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {{
                     followActionLoading[person.id]
@@ -3214,13 +3592,14 @@ watch(
               <!-- Posts Tab -->
               <template v-if="activeExploreTab === 'posts'">
                 <PostFeedCard
-                  v-for="post in timeline"
+                  v-for="post in exploreTimeline"
                   :key="post.id"
                   :post="post"
                   :avatar-url="userAvatarUrl(post.authorId)"
                   :liked="likedPosts[post.id]"
                   :bookmarked="bookmarkedPosts[post.id]"
                   :current-user-id="currentUser?.id"
+                  :mention-users="people"
                   :show-more-menu="true"
                   :more-menu-open="activeMoreMenuId === post.id"
                   @open-profile="goToUserProfile"
@@ -3236,20 +3615,60 @@ watch(
 
               <!-- Topics Tab -->
               <template v-else-if="activeExploreTab === 'topics'">
-                <div v-for="tag in trendingTags" :key="tag.tag" class="p-6 transition hover:bg-[var(--panel-soft)] flex items-center justify-between cursor-pointer">
-                  <div>
-                    <div class="font-bold text-lg text-[color:var(--text-primary)]">#{{ tag.tag }}</div>
-                    <div class="text-sm text-[color:var(--text-muted)] mt-1">热门话题</div>
+                <template v-if="!selectedTopicTag">
+                  <div
+                    v-for="tag in trendingTags"
+                    :key="tag.tag"
+                    class="p-6 transition hover:bg-[var(--panel-soft)] flex items-center justify-between cursor-pointer"
+                    @click="openTopicTagFeed(tag.tag)"
+                  >
+                    <div>
+                      <div class="font-bold text-lg text-[color:var(--text-primary)]">#{{ tag.tag }}</div>
+                      <div class="text-sm text-[color:var(--text-muted)] mt-1">热门话题</div>
+                    </div>
+                    <div class="rounded-full bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-600">
+                      {{ tag.count }} 摩文
+                    </div>
                   </div>
-                  <div class="rounded-full bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-600">
-                    {{ tag.count }} 摩文
+                </template>
+                <template v-else>
+                  <div class="px-6 py-4 flex items-center justify-between border-b border-[color:var(--border-color)]">
+                    <div class="text-lg font-semibold text-[color:var(--text-primary)]">#{{ selectedTopicTag }}</div>
+                    <button @click="clearTopicTagFeed" class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-semibold text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)]">返回话题</button>
                   </div>
-                </div>
+                  <div v-if="topicTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">该话题下暂无摩文。</div>
+                  <PostFeedCard
+                    v-for="post in topicTimeline"
+                    v-else
+                    :key="post.id"
+                    :post="post"
+                    :avatar-url="userAvatarUrl(post.authorId)"
+                    :liked="likedPosts[post.id]"
+                    :bookmarked="bookmarkedPosts[post.id]"
+                    :current-user-id="currentUser?.id"
+                    :mention-users="people"
+                    :show-more-menu="true"
+                    :more-menu-open="activeMoreMenuId === post.id"
+                    @open-profile="goToUserProfile"
+                    @open-detail="openPostDetail"
+                    @forward="openForwardDialog"
+                    @toggle-like="toggleLike"
+                    @toggle-bookmark="toggleBookmark"
+                    @toggle-more="toggleMoreMenu"
+                    @menu-action="handleMenuAction"
+                    @vote="handleVote"
+                  />
+                </template>
               </template>
 
               <!-- Users Tab -->
               <template v-else-if="activeExploreTab === 'users'">
-                <article v-for="person in recommendedPeople" :key="person.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
+                <article
+                  v-for="person in recommendedPeople"
+                  :key="person.id"
+                  class="cursor-pointer p-6 transition hover:bg-[var(--panel-soft)]"
+                  @click="goToUserProfile(person.id)"
+                >
                   <div class="flex items-start justify-between gap-4">
                     <div class="flex min-w-0 gap-4">
                       <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
@@ -3266,21 +3685,15 @@ watch(
                     </div>
                     <div class="flex shrink-0 items-center gap-2">
                       <button
-                        @click="goToUserProfile(person.id)"
-                        class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-semibold text-[color:var(--text-secondary)] transition hover:border-cyan-500/40 hover:bg-cyan-500/10 hover:text-cyan-300"
-                      >
-                        查看主页
-                      </button>
-                      <button
-                        @click="startConversation(person)"
-                        class="inline-flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/8 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-500/12 hover:text-emerald-200"
+                        @click.stop="startConversation(person)"
+                        class="inline-flex items-center gap-2 rounded-xl bg-cyan-600 px-5 py-2 text-sm font-bold tracking-wide text-white shadow-sm transition hover:bg-cyan-500 hover:shadow-cyan-500/25"
                       >
                         <MessageCircle class="h-4 w-4" />
                         <span>{{ isCrossInstanceUser(person) ? '跨联邦发消息' : '发消息' }}</span>
                       </button>
                       <button
-                        @click="toggleFollow(person.id)"
-                        class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-emerald-500"
+                        @click.stop="toggleFollow(person.id)"
+                        class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold tracking-wide text-white shadow-sm transition hover:bg-emerald-500 hover:shadow-emerald-500/25"
                       >
                         {{ followedUsers[person.id] ? '已关注' : '关注' }}
                       </button>
@@ -3332,8 +3745,8 @@ watch(
                       </div>
                       
                       <!-- Post Media (News Tab) -->
-                      <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[70vh] w-full object-contain bg-[var(--panel-contrast)]" />
+                      <div v-if="post.media" class="mt-4 overflow-hidden rounded-xl">
+                        <img :src="post.media.preview" :alt="post.media.name" class="max-h-[70vh] w-full h-auto object-contain" />
                       </div>
                       
                       <!-- Interaction Row -->
@@ -3362,7 +3775,7 @@ watch(
                           class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-indigo-500/10 hover:text-indigo-400"
                           :class="bookmarkedPosts[post.id] ? 'text-indigo-400' : 'text-[color:var(--text-secondary)]'"
                         >
-                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks || '' }}
                         </button>
                         
                         <!-- More Menu Wrapper -->
@@ -3382,6 +3795,13 @@ watch(
                             <div class="py-1">
                               <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
                               <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
+                              <button
+                                v-if="currentUser?.id && post.authorId === currentUser.id"
+                                @click="handleMenuAction('delete', post)"
+                                class="w-full text-left px-4 py-2.5 text-rose-500 hover:bg-rose-500/10"
+                              >
+                                删除帖子
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -3403,8 +3823,8 @@ watch(
                       <div class="text-xl font-semibold text-[color:var(--text-primary)]">消息</div>
                       <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择一个联系人开始聊天</div>
                     </div>
-                    <div class="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
-                      {{ conversations.length }} 条消息
+                    <div class="flex h-7 min-w-7 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold leading-none text-white shadow-sm">
+                      {{ unreadConversationCount > 99 ? '99+' : unreadConversationCount }}
                     </div>
                   </div>
                 </div>
@@ -3413,7 +3833,7 @@ watch(
                   还没有私信消息，去“当前热门 → 用户”里点击“发消息”开始第一段聊天。
                 </div>
 
-                <div v-else class="min-h-0 flex-1 overflow-y-auto divide-y divide-[color:var(--border-color)]">
+                <div v-else class="min-h-0 flex-1 overflow-y-auto divide-y divide-[color:var(--border-color)] no-scrollbar">
                   <button
                     v-for="conversation in conversations"
                     :key="conversation.id"
@@ -3428,7 +3848,13 @@ watch(
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between gap-3">
                         <div class="truncate text-[15px] font-semibold text-[color:var(--text-primary)]">{{ conversation.name }}</div>
-                        <div class="shrink-0 text-xs text-[color:var(--text-muted)]">{{ conversation.messages[conversation.messages.length - 1]?.time || '' }}</div>
+                        <div class="flex shrink-0 items-center gap-2">
+                          <span
+                            v-if="latestPeerMessageTimestamp(conversation) > (readConversationAt[conversation.id] || 0)"
+                            class="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500"
+                          />
+                          <span class="text-xs text-[color:var(--text-muted)]">{{ conversation.messages[conversation.messages.length - 1]?.time || '' }}</span>
+                        </div>
                       </div>
                       <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ conversation.handle }}</div>
                       <div v-if="conversation.crossInstance" class="mt-1 truncate text-xs font-medium text-emerald-400">
@@ -3448,11 +3874,22 @@ watch(
                     class="relative flex shrink-0 items-center gap-4 overflow-hidden border-b border-[color:var(--border-color)] px-6 py-5"
                     :style="activeConversation.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${activeConversation.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
                   >
-                    <div v-if="!activeConversation.backgroundUrl" class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100" />
-                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
+                    <button
+                      v-if="!activeConversation.backgroundUrl && activeConversation.participantId"
+                      type="button"
+                      class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100"
+                      title="查看对方主页"
+                      @click.stop="goToUserProfile(activeConversation.participantId)"
+                    />
+                    <button
+                      type="button"
+                      class="relative z-10 flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                      title="查看对方主页"
+                      @click.stop="activeConversation.participantId && goToUserProfile(activeConversation.participantId)"
+                    >
                       <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
                       <template v-else>{{ activeConversation.avatarLabel }}</template>
-                    </div>
+                    </button>
                     <div class="min-w-0">
                       <div class="truncate text-lg font-semibold text-[color:var(--text-primary)]">{{ activeConversation.name }}</div>
                       <div class="mt-1 truncate text-sm text-[color:var(--text-secondary)]">{{ activeConversation.handle }}</div>
@@ -3463,7 +3900,7 @@ watch(
                     </div>
                   </div>
 
-                  <div ref="messageListRef" class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+                  <div ref="messageListRef" class="min-h-0 flex-1 overflow-y-auto px-6 py-6 no-scrollbar">
                     <div class="space-y-4">
                       <div
                         v-for="message in activeConversation.messages"
@@ -3476,25 +3913,26 @@ watch(
                             <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
                             <template v-else>{{ activeConversation.avatarLabel }}</template>
                           </div>
-                          <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm leading-6 text-[color:var(--text-primary)] shadow-sm">
+                          <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] px-4 py-3 text-sm leading-6 shadow-sm"
+                            :class="message.forwardedPost ? 'bg-white text-slate-800' : 'bg-[var(--panel-soft)] text-[color:var(--text-primary)]'">
                             <template v-if="message.forwardedPost">
-                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-400">转发帖子</div>
+                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">转发帖子</div>
                               <button
                                 @click="openForwardedPostDetail(message)"
-                                class="block w-full overflow-hidden rounded-xl border border-emerald-500/30 bg-emerald-500/8 text-left transition hover:border-emerald-400/60 hover:bg-emerald-500/12"
+                                class="block w-full overflow-hidden rounded-xl border border-slate-200 bg-white text-left transition hover:border-slate-300 hover:bg-slate-50"
                               >
                                 <div class="px-3 pt-3">
-                                  <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
-                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-[color:var(--text-primary)]">{{ message.forwardedPost.content }}</div>
+                                  <div class="text-xs text-slate-500">{{ forwardedPostAuthorName(message.forwardedPost) }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
+                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-slate-800">{{ message.forwardedPost.content }}</div>
                                 </div>
                                 <div
                                   v-if="message.forwardedPost.media?.preview"
-                                  class="mt-2 overflow-hidden border-t border-emerald-500/20 bg-[var(--panel-contrast)]"
+                                  class="mt-2 overflow-hidden border-t border-slate-200 bg-slate-100"
                                 >
                                   <img
                                     :src="message.forwardedPost.media.preview"
                                     :alt="message.forwardedPost.media.name || '转发帖子图片'"
-                                    class="h-36 w-full object-cover"
+                                    class="max-h-[60vh] w-full h-auto object-contain bg-[var(--panel-contrast)]"
                                   />
                                 </div>
                               </button>
@@ -3505,31 +3943,32 @@ watch(
                         </template>
 
                         <template v-else>
-                          <div class="max-w-[75%] rounded-[22px] rounded-br-md bg-emerald-600 px-4 py-3 text-sm leading-6 text-white shadow-[0_10px_30px_rgba(16,185,129,0.22)]">
+                          <div class="max-w-[75%] rounded-[22px] rounded-br-md px-4 py-3 text-sm leading-6 shadow-sm"
+                            :class="message.forwardedPost ? 'border border-slate-200 bg-white text-slate-800' : 'bg-emerald-600 text-white shadow-[0_10px_30px_rgba(16,185,129,0.22)]'">
                             <template v-if="message.forwardedPost">
-                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-100/90">转发帖子</div>
+                              <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">转发帖子</div>
                               <button
                                 @click="openForwardedPostDetail(message)"
-                                class="block w-full overflow-hidden rounded-xl border border-emerald-200/40 bg-emerald-500/15 text-left transition hover:border-emerald-100/80 hover:bg-emerald-500/25"
+                                class="block w-full overflow-hidden rounded-xl border border-slate-200 bg-white text-left transition hover:border-slate-300 hover:bg-slate-50"
                               >
                                 <div class="px-3 pt-3">
-                                  <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
-                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-white">{{ message.forwardedPost.content }}</div>
+                                  <div class="text-xs text-slate-500">{{ forwardedPostAuthorName(message.forwardedPost) }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
+                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-slate-800">{{ message.forwardedPost.content }}</div>
                                 </div>
                                 <div
                                   v-if="message.forwardedPost.media?.preview"
-                                  class="mt-2 overflow-hidden border-t border-emerald-100/30 bg-white/10"
+                                  class="mt-2 overflow-hidden border-t border-slate-200 bg-slate-100"
                                 >
                                   <img
                                     :src="message.forwardedPost.media.preview"
                                     :alt="message.forwardedPost.media.name || '转发帖子图片'"
-                                    class="h-36 w-full object-cover"
+                                    class="max-h-[60vh] w-full h-auto object-contain bg-[var(--panel-contrast)]"
                                   />
                                 </div>
                               </button>
                             </template>
                             <div v-else>{{ message.text }}</div>
-                            <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>
+                            <div class="mt-2 text-[11px]" :class="message.forwardedPost ? 'text-slate-400' : 'text-emerald-100/80'">{{ message.time }}</div>
                           </div>
                           <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                             <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
@@ -3605,27 +4044,70 @@ watch(
           </section>
 
           <section v-else-if="currentSection === 'lists'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in curatedLists" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
-              <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-6">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="text-xl font-semibold text-[color:var(--text-primary)]">{{ item.title }}</div>
-                  <div class="text-sm text-emerald-600">{{ item.count }}</div>
-                </div>
-                <div class="mt-3 text-base leading-7 text-[color:var(--text-secondary)]">{{ item.summary }}</div>
-              </div>
+            <div class="px-6 py-4">
+              <div class="text-lg font-semibold text-[color:var(--text-primary)]">联邦实例切换</div>
+              <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择实例后将返回主页并按该实例筛选摩文。</div>
+            </div>
+            <article class="px-6 py-4 transition hover:bg-[var(--panel-soft)]">
+              <button @click="selectInstance('all'); setSection('home')" class="w-full text-left">
+                <div class="text-base font-semibold" :class="selectedInstanceName === 'all' ? 'text-emerald-500' : 'text-[color:var(--text-primary)]'">全部摩尔实例</div>
+                <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ instances.length }} 个实例</div>
+              </button>
+            </article>
+            <article v-if="instances.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
+              暂无实例数据。
+            </article>
+            <article v-for="instance in instances" :key="instance.name" class="px-6 py-4 transition hover:bg-[var(--panel-soft)]">
+              <button @click="selectInstance(instance.name); setSection('home')" class="w-full text-left">
+                <div class="text-base font-semibold" :class="selectedInstanceName === instance.name ? 'text-emerald-500' : 'text-[color:var(--text-primary)]'">{{ instance.name }}</div>
+                <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</div>
+              </button>
             </article>
           </section>
 
           <section v-else-if="currentSection === 'topics'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in followedTopicCards" :key="item.tag" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
-              <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-6">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="text-xl font-semibold text-[color:var(--text-primary)]">#{{ item.tag }}</div>
-                  <div class="text-sm text-[color:var(--text-muted)]">{{ item.count }} 条动态</div>
-                </div>
-                <div class="mt-3 line-clamp-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ item.summary }}</div>
+            <template v-if="!selectedTopicTag">
+              <div class="grid grid-cols-1 gap-4 px-6 py-6 sm:grid-cols-2">
+                <button
+                  v-for="item in followedTopicCards"
+                  :key="item.tag"
+                  @click="openTopicTagFeed(item.tag)"
+                  class="group relative overflow-hidden rounded-2xl border border-emerald-400/25 bg-[linear-gradient(160deg,rgba(7,18,14,0.94)_0%,rgba(10,28,20,0.92)_100%)] px-5 py-5 text-left shadow-[0_16px_36px_rgba(0,0,0,0.35)] transition-all hover:-translate-y-0.5 hover:border-emerald-300/45 hover:shadow-[0_20px_42px_rgba(16,185,129,0.18)]"
+                >
+                  <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_100%_0%,rgba(52,211,153,0.18)_0%,transparent_48%)]"></div>
+                  <div class="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(16,185,129,0.08),transparent_45%,rgba(110,231,183,0.06))] opacity-70"></div>
+                  <div class="relative text-xl font-semibold tracking-[0.02em] text-emerald-100 transition group-hover:text-white">#{{ item.label }}</div>
+                </button>
               </div>
-            </article>
+            </template>
+            <template v-else>
+              <div class="px-6 py-4 flex items-center justify-between border-b border-[color:var(--border-color)]">
+                <div class="text-lg font-semibold text-[color:var(--text-primary)]">#{{ selectedTopicTag }}</div>
+                <button @click="clearTopicTagFeed" class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-semibold text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)]">返回话题</button>
+              </div>
+              <div v-if="topicTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">该话题下暂无摩文。</div>
+              <PostFeedCard
+                v-for="post in topicTimeline"
+                v-else
+                :key="post.id"
+                :post="post"
+                :avatar-url="userAvatarUrl(post.authorId)"
+                :liked="likedPosts[post.id]"
+                :bookmarked="bookmarkedPosts[post.id]"
+                :current-user-id="currentUser?.id"
+                :mention-users="people"
+                :show-more-menu="true"
+                :more-menu-open="activeMoreMenuId === post.id"
+                @open-profile="goToUserProfile"
+                @open-detail="openPostDetail"
+                @forward="openForwardDialog"
+                @toggle-like="toggleLike"
+                @toggle-bookmark="toggleBookmark"
+                @toggle-more="toggleMoreMenu"
+                @menu-action="handleMenuAction"
+                @vote="handleVote"
+              />
+            </template>
           </section>
 
           <section v-else-if="currentSection === 'likes'" class="divide-y divide-[color:var(--border-color)]">
@@ -3641,6 +4123,7 @@ watch(
               :liked="likedPosts[post.id]"
               :bookmarked="bookmarkedPosts[post.id]"
               :current-user-id="currentUser?.id"
+              :mention-users="people"
               :show-more-menu="true"
               :more-menu-open="activeMoreMenuId === post.id"
               @open-profile="goToUserProfile"
@@ -3667,6 +4150,7 @@ watch(
               :liked="likedPosts[post.id]"
               :bookmarked="bookmarkedPosts[post.id]"
               :current-user-id="currentUser?.id"
+              :mention-users="people"
               :show-more-menu="true"
               :more-menu-open="activeMoreMenuId === post.id"
               @open-profile="goToUserProfile"
@@ -3697,13 +4181,8 @@ watch(
 
           <!-- preferences section removed - moved to SettingsPage.vue -->
 
-          <section v-else class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in moreCards" :key="item.id" class="px-8 py-8 transition hover:bg-[var(--panel-soft)]">
-              <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-6">
-                <div class="text-xl font-semibold text-[color:var(--text-primary)]">{{ item.title }}</div>
-                <div class="mt-3 text-base leading-7 text-[color:var(--text-secondary)]">{{ item.description }}</div>
-              </div>
-            </article>
+          <section v-else class="px-6 py-10 text-center text-[color:var(--text-muted)]">
+            暂无内容。
           </section>
         </main>
 
@@ -3780,6 +4259,43 @@ watch(
           </div>
         </aside>
       </div>
+
+      <Transition name="modal">
+        <div
+          v-if="showDeletePostDialog"
+          class="fixed inset-0 z-[240] flex items-center justify-center bg-black/45 px-4"
+          @click="cancelDeletePost"
+        >
+          <div
+            class="relative w-full max-w-md rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.45)]"
+            @click.stop
+          >
+            <div class="text-lg font-semibold text-[color:var(--text-primary)]">删除这条摩文？</div>
+            <div class="mt-2 text-sm leading-6 text-[color:var(--text-secondary)]">
+              删除后无法恢复，相关内容会从时间线中移除。
+            </div>
+            <div v-if="deletingPost" class="mt-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm text-[color:var(--text-primary)]">
+              {{ deletingPost.content || '（无正文内容）' }}
+            </div>
+            <div class="mt-6 flex items-center justify-end gap-3">
+              <button
+                @click="cancelDeletePost"
+                :disabled="deletingPostLoading"
+                class="rounded-xl border border-[color:var(--border-color)] px-4 py-2 text-sm font-semibold text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                @click="confirmDeletePost"
+                :disabled="deletingPostLoading"
+                class="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+              >
+                {{ deletingPostLoading ? '删除中...' : '确认删除' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
 
       <Transition name="modal">
         <div
@@ -3887,7 +4403,7 @@ watch(
                     :key="option.id"
                     @click="tempInteraction = option.id"
                     class="rounded-xl border px-3 py-2.5 text-sm font-medium transition"
-                    :class="tempInteraction === option.id ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-cyan-500/40'"
+                    :class="tempInteraction === option.id ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-500/40'"
                   >
                     {{ option.label }}
                   </button>
@@ -3959,6 +4475,12 @@ watch(
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+emoji-picker {
+  width: 100%;
+  max-height: min(22rem, 55vh);
+  --border-radius: 12px;
 }
 </style>
 
