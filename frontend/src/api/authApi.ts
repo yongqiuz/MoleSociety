@@ -114,21 +114,69 @@ export async function logoutSession() {
 
 export async function connectWalletAndLogin() {
   const { signer, address, chainId } = await connectWallet();
+  try {
+    const challenge = await request<ChallengeResponse>('/auth/challenge', {
+      method: 'POST',
+      body: JSON.stringify({ address, chainId }),
+    });
 
-  const challenge = await request<ChallengeResponse>('/auth/challenge', {
-    method: 'POST',
-    body: JSON.stringify({ address, chainId }),
-  });
+    const signature = await signer.signMessage(challenge.message);
+    return await request<AuthSession>('/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        address,
+        nonce: challenge.nonce,
+        signature,
+      }),
+    });
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.code !== 'AUTH_WALLET_NOT_BOUND') {
+      throw error;
+    }
 
-  const signature = await signer.signMessage(challenge.message);
-  return request<AuthSession>('/auth/verify', {
-    method: 'POST',
-    body: JSON.stringify({
-      address,
-      nonce: challenge.nonce,
-      signature,
-    }),
-  });
+    const bindChallenge = await fetchBindChallenge(address, chainId);
+    const bindSignature = await signer.signMessage(bindChallenge.message);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const username = buildWalletUsername(address, attempt);
+      try {
+        return await registerAccount({
+          username,
+          password: buildWalletPassword(),
+          autoWallet: false,
+          walletAddress: address,
+          chainId,
+          nonce: bindChallenge.nonce,
+          signature: bindSignature,
+        });
+      } catch (registerError) {
+        if (
+          registerError instanceof ApiError &&
+          registerError.code === 'AUTH_USERNAME_TAKEN' &&
+          attempt < 2
+        ) {
+          continue;
+        }
+        throw registerError;
+      }
+    }
+
+    throw new ApiError('wallet registration failed after retries', 409, 'AUTH_USERNAME_TAKEN', 'conflict');
+  }
+}
+
+function buildWalletUsername(address: string, attempt: number) {
+  const normalized = address.toLowerCase().replace(/^0x/, '');
+  const base = `wallet_${normalized.slice(0, 8)}`;
+  if (attempt <= 0) return base;
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${base}_${suffix}`;
+}
+
+function buildWalletPassword() {
+  const random = Math.random().toString(36).slice(2);
+  const timestamp = Date.now().toString(36);
+  return `mw_${timestamp}_${random}`;
 }
 
 export async function passwordLogin(identifier: string, password: string) {
