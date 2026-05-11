@@ -31,6 +31,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -38,6 +39,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import org.bouncycastle.jcajce.provider.digest.Keccak;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -344,6 +346,24 @@ class SocialController {
     try {
       social.unfollowUser(requiredUser(request).id, id);
       return ApiResponse.ok(Map.of("unfollowed", true));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @GetMapping("/users/{id}/followers")
+  ResponseEntity<ApiResponse<List<SocialUser>>> followers(@PathVariable String id, @RequestParam(defaultValue = "100") int limit) {
+    try {
+      return ApiResponse.ok(social.listFollowers(id, limit));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @GetMapping("/users/{id}/following")
+  ResponseEntity<ApiResponse<List<SocialUser>>> following(@PathVariable String id, @RequestParam(defaultValue = "100") int limit) {
+    try {
+      return ApiResponse.ok(social.listFollowing(id, limit));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -1870,6 +1890,33 @@ class SocialService {
       persistence.saveUser(user);
     }
     persistence.saveSocialSnapshot(snapshot());
+  }
+
+  synchronized List<SocialUser> listFollowers(String userID, int limit) {
+    getUser(userID);
+    Set<String> followerIDs = follows.entrySet().stream()
+        .filter(entry -> entry.getValue().contains(userID))
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toCollection(LinkedHashSet::new));
+    List<SocialUser> result = followerIDs.stream()
+        .map(this::findUser)
+        .filter(Optional::isPresent)
+        .map(Optional::get)
+        .sorted(Comparator.comparing((SocialUser u) -> u.createdAt).reversed())
+        .toList();
+    return slice(result, limit);
+  }
+
+  synchronized List<SocialUser> listFollowing(String userID, int limit) {
+    getUser(userID);
+    Set<String> followingIDs = new LinkedHashSet<>(follows.getOrDefault(userID, Set.of()));
+    List<SocialUser> result = followingIDs.stream()
+        .map(this::findUser)
+        .filter(Optional::isPresent)
+        .map(Optional::get)
+        .sorted(Comparator.comparing((SocialUser u) -> u.createdAt).reversed())
+        .toList();
+    return slice(result, limit);
   }
 
   synchronized List<SocialPost> feed(int limit, String currentUserID) {

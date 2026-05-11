@@ -98,6 +98,15 @@ type FeedCard = {
   };
   interaction: string;
   poll?: Poll;
+  createdAt?: string;
+};
+
+type NotificationItem = {
+  id: string;
+  title: string;
+  body: string;
+  time: string;
+  sortAt: number;
 };
 
 type AssetCard = {
@@ -231,6 +240,7 @@ const emojiTriggerRef = ref<HTMLElement | null>(null);
 const postSelectionStart = ref(0);
 const postSelectionEnd = ref(0);
 const processingMessageIntent = ref(false);
+const notificationFeed = ref<NotificationItem[]>([]);
 const route = useRoute();
 const router = useRouter();
 const { session: authSession } = useAuth();
@@ -246,6 +256,8 @@ const PULL_REFRESH_THRESHOLD = 72;
 const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
 const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
 const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
+const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
+const MENTION_READ_STORAGE_PREFIX = 'mole-mention-read';
 
 const isLoggedIn = computed(() => !!authSession.value);
 
@@ -260,10 +272,64 @@ function toggleMoreMenu(postId: string) {
   activeMoreMenuId.value = activeMoreMenuId.value === postId ? null : postId;
 }
 
-function handleMenuAction(action: string, post: FeedCard) {
-  activeMoreMenuId.value = null; // Close menu after action
-  // Placeholder actions
-  console.log(`Action [${action}] on post:`, post.id);
+function toPostPublicUrl(post: FeedCard) {
+  if (typeof window === 'undefined') return '';
+  const origin = window.location.origin || '';
+  return `${origin}/app?post=${encodeURIComponent(post.id)}`;
+}
+
+function toMentionToken(post: FeedCard) {
+  const handle = String(post.handle || '').replace(/^@/, '').trim();
+  const instance = String(post.instance || '').trim();
+  if (!handle && !instance) return '';
+  if (!handle) return `@${instance}`;
+  if (!instance) return `@${handle}`;
+  return `@${handle}@${instance}`;
+}
+
+async function injectMentionIntoComposer(post: FeedCard) {
+  const mentionToken = toMentionToken(post);
+  if (!mentionToken) return;
+
+  const hasMention = postDraft.value.includes(mentionToken);
+  if (!hasMention) {
+    postDraft.value = postDraft.value.trim()
+      ? `${postDraft.value.trim()} ${mentionToken} `
+      : `${mentionToken} `;
+  }
+
+  currentSection.value = 'home';
+  showTagPicker.value = false;
+  showEmojiPicker.value = false;
+  syncPostCursor();
+  await nextTick();
+  if (postComposerRef.value) {
+    postComposerRef.value.focus();
+    const pos = postDraft.value.length;
+    postComposerRef.value.setSelectionRange(pos, pos);
+  }
+}
+
+async function handleMenuAction(action: string, post: FeedCard) {
+  activeMoreMenuId.value = null;
+  if (action === 'share') {
+    await openForwardDialog(post);
+    return;
+  }
+  if (action === 'mention') {
+    await injectMentionIntoComposer(post);
+    return;
+  }
+  if (action === 'copyLink') {
+    const postUrl = toPostPublicUrl(post);
+    if (!postUrl || typeof navigator === 'undefined' || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(postUrl);
+    } catch {
+      errorMessage.value = '复制链接失败，请稍后重试。';
+    }
+    return;
+  }
 }
 
 // Visibility and Interaction State
@@ -441,6 +507,19 @@ const likedTimeline = computed(() => posts.value.filter((post) => likedPosts.val
 const bookmarkedTimeline = computed(() => posts.value.filter((post) => bookmarkedPosts.value[post.id]));
 
 const notificationItems = computed(() => {
+  const mentionEvents = currentUser.value
+    ? posts.value
+        .filter(isPostMentioningCurrentUser)
+        .slice(0, 5)
+        .map((post) => ({
+          id: `mention-${post.id}`,
+          title: `${post.author} 提及了你`,
+          body: post.content,
+          time: post.time || '刚刚',
+          sortAt: post.createdAt ? new Date(post.createdAt).getTime() : 0,
+        }))
+    : [];
+
   const suggestedUsers = recommendedPeople.value.slice(0, 2).map((person) => {
     const hasPublished = posts.value.some((post) => post.authorId === person.id);
     return {
@@ -450,6 +529,7 @@ const notificationItems = computed(() => {
         ? `${formatHandleInstance(person.handle, person.instance)} 已发布动态，适合加入你的关注流。`
         : `${formatHandleInstance(person.handle, person.instance)} 刚加入社区，欢迎关注。`,
       time: '刚刚',
+      sortAt: 0,
     };
   });
 
@@ -458,10 +538,15 @@ const notificationItems = computed(() => {
     title: `${post.author} 发布了新内容`,
     body: post.content,
     time: post.time,
+    sortAt: post.createdAt ? new Date(post.createdAt).getTime() : 0,
   }));
 
-  return [...suggestedUsers, ...postEvents];
+  return [...mentionEvents, ...suggestedUsers, ...postEvents];
 });
+
+const orderedNotificationItems = computed(() =>
+  [...notificationFeed.value].sort((a, b) => b.sortAt - a.sortAt),
+);
 
 const curatedLists = computed(() => [
   {
@@ -491,15 +576,63 @@ const followedTopicCards = computed(() =>
   })),
 );
 
+function escapeRegex(input: string) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isPostMentioningCurrentUser(post: FeedCard) {
+  if (!currentUser.value) return false;
+  const handle = String(currentUser.value.handle || '').replace(/^@/, '').trim();
+  const instance = String(currentUser.value.instance || '').trim();
+  if (!handle) return false;
+
+  const escapedHandle = escapeRegex(handle);
+  const escapedInstance = escapeRegex(instance);
+  const fullPattern = new RegExp(`(^|\\s)@${escapedHandle}@${escapedInstance}(?=\\s|$)`, 'i');
+  const shortPattern = new RegExp(`(^|\\s)@${escapedHandle}(?=\\s|$)`, 'i');
+  const content = String(post.content || '');
+  return fullPattern.test(content) || shortPattern.test(content);
+}
+
 const mentionItems = computed(() => {
-  const handle = currentUser.value?.handle ?? '';
-  return conversations.value.map((conversation) => ({
-    id: conversation.id,
-    title: conversation.name,
-    body: `${conversation.handle} 在私密对话中提到了 ${handle}`,
-    time: conversation.messages[conversation.messages.length - 1]?.time ?? '刚刚',
-  }));
+  if (!currentUser.value) return [];
+  return posts.value
+    .filter(isPostMentioningCurrentUser)
+    .map((post) => ({
+      id: post.id,
+      title: `${post.author} 提及了你`,
+      body: post.content,
+      time: post.time || '刚刚',
+    }));
 });
+
+const unreadNotificationCount = computed(() =>
+  orderedNotificationItems.value.filter((item) => !readNotificationIds.value[item.id]).length,
+);
+
+const unreadMentionCount = computed(() =>
+  mentionItems.value.filter((item) => !readMentionIds.value[item.id]).length,
+);
+
+function markNotificationsAsRead() {
+  if (orderedNotificationItems.value.length === 0) return;
+  const next = { ...readNotificationIds.value };
+  orderedNotificationItems.value.forEach((item) => {
+    next[item.id] = true;
+  });
+  readNotificationIds.value = next;
+  persistReadState();
+}
+
+function markMentionsAsRead() {
+  if (mentionItems.value.length === 0) return;
+  const next = { ...readMentionIds.value };
+  mentionItems.value.forEach((item) => {
+    next[item.id] = true;
+  });
+  readMentionIds.value = next;
+  persistReadState();
+}
 
 const moreCards = computed(() => [
   {
@@ -585,6 +718,53 @@ function persistInteractionState() {
   }
   if (bookmarkKey) {
     window.localStorage.setItem(bookmarkKey, JSON.stringify(bookmarkedPosts.value));
+  }
+}
+
+function notificationReadStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${NOTIFICATION_READ_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function mentionReadStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${MENTION_READ_STORAGE_PREFIX}:${userId}` : '';
+}
+
+const readNotificationIds = ref<Record<string, boolean>>({});
+const readMentionIds = ref<Record<string, boolean>>({});
+
+function loadReadState() {
+  if (typeof window === 'undefined') return;
+  readNotificationIds.value = {};
+  readMentionIds.value = {};
+  const notificationKey = notificationReadStorageKey();
+  const mentionKey = mentionReadStorageKey();
+  if (notificationKey) {
+    try {
+      readNotificationIds.value = JSON.parse(window.localStorage.getItem(notificationKey) || '{}');
+    } catch {
+      readNotificationIds.value = {};
+    }
+  }
+  if (mentionKey) {
+    try {
+      readMentionIds.value = JSON.parse(window.localStorage.getItem(mentionKey) || '{}');
+    } catch {
+      readMentionIds.value = {};
+    }
+  }
+}
+
+function persistReadState() {
+  if (typeof window === 'undefined') return;
+  const notificationKey = notificationReadStorageKey();
+  const mentionKey = mentionReadStorageKey();
+  if (notificationKey) {
+    window.localStorage.setItem(notificationKey, JSON.stringify(readNotificationIds.value));
+  }
+  if (mentionKey) {
+    window.localStorage.setItem(mentionKey, JSON.stringify(readMentionIds.value));
   }
 }
 
@@ -729,6 +909,7 @@ function toFeedCard(post: SocialPost): FeedCard {
     content: post.content,
     type: post.type || 'post',
     interaction: post.interaction || 'anyone',
+    createdAt: post.createdAt,
     bio: person?.bio,
     tags: post.tags,
     chainProof: post.txHash || post.attestationUri || post.storageUri || 'unverified://pending',
@@ -820,6 +1001,18 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
       explorerUrl: message.explorerUrl,
     })),
   };
+}
+
+function syncNotificationFeed() {
+  const existing = new Map(notificationFeed.value.map((item) => [item.id, item]));
+  for (const item of notificationItems.value) {
+    if (!existing.has(item.id)) {
+      existing.set(item.id, item);
+    }
+  }
+  notificationFeed.value = [...existing.values()]
+    .sort((a, b) => b.sortAt - a.sortAt)
+    .slice(0, 200);
 }
 
 function upsertConversation(conversation: ConversationCard) {
@@ -1100,16 +1293,34 @@ async function loadBootstrap() {
 async function handleRouteMessageIntent() {
   if (processingMessageIntent.value) return;
   const targetUserId = typeof route.query.messageUser === 'string' ? route.query.messageUser.trim() : '';
-  if (!targetUserId || !currentUser.value) return;
-  const targetUser = people.value.find((person) => person.id === targetUserId);
-  if (!targetUser || targetUser.id === currentUser.value.id) {
-    await router.replace('/app');
-    return;
-  }
+  const targetPostId = typeof route.query.post === 'string' ? route.query.post.trim() : '';
+  const sharePostId = typeof route.query.sharePost === 'string' ? route.query.sharePost.trim() : '';
+  if (!targetUserId && !targetPostId && !sharePostId) return;
+  if (!currentUser.value) return;
 
   processingMessageIntent.value = true;
   try {
-    await startConversation(targetUser);
+    if (targetUserId) {
+      const targetUser = people.value.find((person) => person.id === targetUserId);
+      if (targetUser && targetUser.id !== currentUser.value.id) {
+        await startConversation(targetUser);
+      }
+    }
+
+    if (targetPostId) {
+      await openPostDetail(targetPostId, false);
+    }
+
+    if (sharePostId) {
+      const targetPost = posts.value.find((post) => post.id === sharePostId)
+        || myPosts.value.find((post) => post.id === sharePostId)
+        || threadReplies.value.find((post) => post.id === sharePostId)
+        || threadAncestors.value.find((post) => post.id === sharePostId)
+        || (threadFocusPost.value?.id === sharePostId ? threadFocusPost.value : null);
+      if (targetPost) {
+        await openForwardDialog(targetPost);
+      }
+    }
   } finally {
     await router.replace('/app');
     processingMessageIntent.value = false;
@@ -1650,6 +1861,7 @@ onMounted(() => {
   loadPostingPrivacySettings();
   loadRecentPostTags();
   loadInteractionState();
+  loadReadState();
   document.addEventListener('click', handleDocumentClick);
 });
 
@@ -1672,12 +1884,46 @@ watch(
   () => authSession.value?.id,
   () => {
     loadInteractionState();
+    loadReadState();
   },
 );
 
 watch([likedPosts, bookmarkedPosts], () => {
   persistInteractionState();
 }, { deep: true });
+
+watch(
+  () => currentSection.value,
+  (section) => {
+    if (section === 'notifications') {
+      markNotificationsAsRead();
+    }
+    if (section === 'mentions') {
+      markMentionsAsRead();
+    }
+  },
+);
+
+watch(notificationItems, () => {
+  syncNotificationFeed();
+  if (currentSection.value === 'notifications') {
+    markNotificationsAsRead();
+  }
+});
+
+watch(mentionItems, () => {
+  if (currentSection.value === 'mentions') {
+    markMentionsAsRead();
+  }
+});
+
+watch(
+  () => authSession.value?.id,
+  () => {
+    notificationFeed.value = [];
+    syncNotificationFeed();
+  },
+);
 </script>
 
 <template>
@@ -1703,9 +1949,10 @@ watch([likedPosts, bookmarkedPosts], () => {
             </div>
 
             <div
-              class="flex items-center gap-3 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-3"
+              class="relative flex items-center gap-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-3"
               :style="currentUser?.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${currentUser.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
             >
+              <div v-if="!currentUser?.backgroundUrl" class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100" />
               <button
                 @click="currentUser?.id && goToUserProfile(currentUser.id)"
                 class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
@@ -1996,7 +2243,7 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div class="flex gap-3">
                 <button
                   @click="goToUserProfile(post.authorId)"
-                  class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+                  class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
                   title="查看用户主页"
                 >
                   <img v-if="userAvatarUrl(post.authorId)" :src="userAvatarUrl(post.authorId)" class="h-full w-full object-cover" />
@@ -2180,7 +2427,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                 <div class="flex gap-4">
                   <button
                     @click="goToUserProfile(threadFocusPost.authorId)"
-                    class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-lg font-bold text-slate-900"
+                    class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
                     title="查看用户主页"
                   >
                     <img v-if="userAvatarUrl(threadFocusPost.authorId)" :src="userAvatarUrl(threadFocusPost.authorId)" class="h-full w-full object-cover" />
@@ -2321,7 +2568,7 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div ref="replyComposerRef" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
                 <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-5">
                   <div class="flex items-start gap-4">
-                    <div class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900">
+                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                       <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
                       <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                     </div>
@@ -2550,7 +2797,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                 <article v-for="person in recommendedPeople" :key="person.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
                   <div class="flex items-start justify-between gap-4">
                     <div class="flex min-w-0 gap-4">
-                      <div class="h-14 w-14 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-lg font-bold text-slate-900">
+                      <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                         {{ avatarText(person.displayName) }}
                       </div>
                       <div class="min-w-0">
@@ -2724,7 +2971,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                     class="flex w-full items-start gap-3 px-5 py-4 text-left transition hover:bg-[var(--chip-hover)]"
                     :class="selectedConversationId === conversation.id ? 'bg-emerald-500/10' : ''"
                   >
-                    <div class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                       <img v-if="conversation.avatarUrl" :src="conversation.avatarUrl" class="h-full w-full object-cover" />
                       <template v-else>{{ conversation.avatarLabel }}</template>
                     </div>
@@ -2748,10 +2995,11 @@ watch([likedPosts, bookmarkedPosts], () => {
               <div class="flex min-h-0 flex-col bg-[var(--frame-bg)]">
                 <template v-if="activeConversation">
                   <div
-                    class="flex shrink-0 items-center gap-4 border-b border-[color:var(--border-color)] px-6 py-5"
+                    class="relative flex shrink-0 items-center gap-4 overflow-hidden border-b border-[color:var(--border-color)] px-6 py-5"
                     :style="activeConversation.backgroundUrl ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.30), rgba(0,0,0,0.30)), url(${activeConversation.backgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}"
                   >
-                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-base font-bold text-slate-900">
+                    <div v-if="!activeConversation.backgroundUrl" class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition hover:opacity-100" />
+                    <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                       <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
                       <template v-else>{{ activeConversation.avatarLabel }}</template>
                     </div>
@@ -2774,7 +3022,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                         :class="message.from === 'me' ? 'justify-end' : 'justify-start'"
                       >
                         <template v-if="message.from === 'peer'">
-                          <div class="flex h-10 w-10 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-amber-200 to-emerald-200 text-sm font-bold text-slate-900">
+                          <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                             <img v-if="activeConversation.avatarUrl" :src="activeConversation.avatarUrl" class="h-full w-full object-cover" />
                             <template v-else>{{ activeConversation.avatarLabel }}</template>
                           </div>
@@ -2803,7 +3051,7 @@ watch([likedPosts, bookmarkedPosts], () => {
                             <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>
                           </div>
-                          <div class="flex h-10 w-10 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                          <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                             <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
                             <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                           </div>
@@ -2820,7 +3068,7 @@ watch([likedPosts, bookmarkedPosts], () => {
 
                   <div class="shrink-0 border-t border-[color:var(--border-color)] bg-[var(--panel-soft)] px-6 py-5">
                     <div class="flex items-end gap-4">
-                      <div class="flex h-11 w-11 flex-none items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-lime-200 to-cyan-200 text-sm font-bold text-slate-900">
+                      <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
                         <img v-if="currentUser?.avatarUrl" :src="currentUser.avatarUrl" class="h-full w-full object-cover" />
                         <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                       </div>
@@ -2862,7 +3110,7 @@ watch([likedPosts, bookmarkedPosts], () => {
           </section>
 
           <section v-else-if="currentSection === 'notifications'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in notificationItems" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+            <article v-for="item in orderedNotificationItems" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex items-start gap-4">
                 <div class="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600/12 text-emerald-600">◌</div>
                 <div class="min-w-0 flex-1">
@@ -2996,6 +3244,12 @@ watch([likedPosts, bookmarkedPosts], () => {
               >
                 <component :is="item.icon" class="w-[18px] h-[18px] stroke-[1.8]" />
                 <span>{{ item.label }}</span>
+                <span
+                  v-if="item.key === 'notifications' && unreadNotificationCount > 0"
+                  class="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-white"
+                >
+                  {{ unreadNotificationCount > 99 ? '99+' : unreadNotificationCount }}
+                </span>
               </button>
             </div>
 
@@ -3010,6 +3264,12 @@ watch([likedPosts, bookmarkedPosts], () => {
                 >
                   <component :is="item.icon" class="w-[17px] h-[17px] stroke-[1.5]" />
                   <span>{{ item.label }}</span>
+                  <span
+                    v-if="item.key === 'mentions' && unreadMentionCount > 0"
+                    class="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-white"
+                  >
+                    {{ unreadMentionCount > 99 ? '99+' : unreadMentionCount }}
+                  </span>
                 </button>
               </div>
             </div>

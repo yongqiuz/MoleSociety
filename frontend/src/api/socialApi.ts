@@ -284,6 +284,27 @@ export async function updateUserProfile(userId: string, payload: UpdateUserReque
   });
 }
 
+export async function followUser(userId: string) {
+  return request<{ followed: boolean }>(`/social/users/${userId}/follow`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function unfollowUser(userId: string) {
+  return request<{ unfollowed: boolean }>(`/social/users/${userId}/follow`, {
+    method: 'DELETE',
+  });
+}
+
+export async function fetchUserFollowers(userId: string, limit = 100) {
+  return request<SocialUser[]>(`/social/users/${userId}/followers?limit=${limit}`);
+}
+
+export async function fetchUserFollowing(userId: string, limit = 100) {
+  return request<SocialUser[]>(`/social/users/${userId}/following?limit=${limit}`);
+}
+
 export async function voteOnPoll(postId: string, optionIndices: number[]) {
   return request<SocialPost>(`/social/posts/${postId}/poll/vote`, {
     method: 'POST',

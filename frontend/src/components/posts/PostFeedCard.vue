@@ -72,7 +72,7 @@ function avatarText(name: string) {
     <div class="flex gap-3">
       <button
         @click="emit('open-profile', post.authorId)"
-        class="flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-200 text-base font-bold text-slate-900"
+        class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
         title="查看用户主页"
       >
         <img v-if="avatarUrl" :src="avatarUrl" class="h-full w-full object-cover" />
