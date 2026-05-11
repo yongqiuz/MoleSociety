@@ -239,6 +239,8 @@ const MAX_POST_LENGTH = 500;
 const MAX_POST_TAGS = 5;
 const MAX_TAG_LENGTH = 24;
 const RECENT_TAGS_STORAGE_KEY = 'mole-compose-recent-tags';
+const POSTING_PRIVACY_STORAGE_KEY = 'mole-posting-privacy-settings';
+const PRIVACY_SETTINGS_STORAGE_KEY = 'mole-privacy-settings';
 const PULL_MAX_DISTANCE = 120;
 const PULL_REFRESH_THRESHOLD = 72;
 const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
@@ -1019,7 +1021,56 @@ function closeVisibilityModal() {
 function saveVisibilitySettings() {
   visibility.value = tempVisibility.value;
   interaction.value = tempInteraction.value;
+  persistPostingPrivacySettings();
   showVisibilityModal.value = false;
+}
+
+function normalizeInteractionFromPrivacy(value: string) {
+  if (value === 'none') return 'me';
+  if (value === 'followers') return 'followers';
+  return 'anyone';
+}
+
+function normalizeVisibility(value: string) {
+  if (['public', 'unlisted', 'private', 'direct'].includes(value)) return value;
+  return 'public';
+}
+
+function normalizeInteraction(value: string) {
+  if (['anyone', 'followers', 'me'].includes(value)) return value;
+  return 'anyone';
+}
+
+function loadPostingPrivacySettings() {
+  if (typeof window === 'undefined') return;
+  try {
+    const rawPosting = window.localStorage.getItem(POSTING_PRIVACY_STORAGE_KEY);
+    if (rawPosting) {
+      const parsed = JSON.parse(rawPosting) as Partial<{ visibility: string; interaction: string }>;
+      visibility.value = normalizeVisibility(String(parsed.visibility || 'public'));
+      interaction.value = normalizeInteraction(String(parsed.interaction || 'anyone'));
+      return;
+    }
+  } catch {
+    // ignore invalid local storage data
+  }
+
+  try {
+    const rawPrivacy = window.localStorage.getItem(PRIVACY_SETTINGS_STORAGE_KEY);
+    if (!rawPrivacy) return;
+    const parsed = JSON.parse(rawPrivacy) as Partial<{ allowQuoteFrom: string }>;
+    interaction.value = normalizeInteractionFromPrivacy(String(parsed.allowQuoteFrom || 'anyone'));
+  } catch {
+    // ignore invalid local storage data
+  }
+}
+
+function persistPostingPrivacySettings() {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(POSTING_PRIVACY_STORAGE_KEY, JSON.stringify({
+    visibility: visibility.value,
+    interaction: interaction.value,
+  }));
 }
 
 async function loadBootstrap() {
@@ -1596,6 +1647,7 @@ onMounted(() => {
     await loadBootstrap();
     await handleRouteMessageIntent();
   })();
+  loadPostingPrivacySettings();
   loadRecentPostTags();
   loadInteractionState();
   document.addEventListener('click', handleDocumentClick);

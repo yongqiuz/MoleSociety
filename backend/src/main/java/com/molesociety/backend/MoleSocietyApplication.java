@@ -352,7 +352,7 @@ class SocialController {
   @GetMapping("/feed")
   ResponseEntity<ApiResponse<List<SocialPost>>> feed(@RequestParam(defaultValue = "20") int limit, @RequestParam(defaultValue = "0") String mine, HttpServletRequest request) {
     String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
-    return ApiResponse.ok(Env.truthy(mine) ? social.feedMine(limit, userID) : social.feed(limit));
+    return ApiResponse.ok(Env.truthy(mine) ? social.feedMine(limit, userID) : social.feed(limit, userID));
   }
 
   @PostMapping("/posts")
@@ -366,27 +366,30 @@ class SocialController {
   }
 
   @GetMapping("/posts/{id}")
-  ResponseEntity<ApiResponse<SocialPost>> post(@PathVariable String id) {
+  ResponseEntity<ApiResponse<SocialPost>> post(@PathVariable String id, HttpServletRequest request) {
     try {
-      return ApiResponse.ok(social.getPost(id));
+      String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+      return ApiResponse.ok(social.getPost(id, userID));
     } catch (ApiException err) {
       return err.toResponse();
     }
   }
 
   @GetMapping("/posts/{id}/thread")
-  ResponseEntity<ApiResponse<PostThread>> thread(@PathVariable String id, @RequestParam(defaultValue = "20") int limit) {
+  ResponseEntity<ApiResponse<PostThread>> thread(@PathVariable String id, @RequestParam(defaultValue = "20") int limit, HttpServletRequest request) {
     try {
-      return ApiResponse.ok(social.getPostThread(id, limit));
+      String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+      return ApiResponse.ok(social.getPostThread(id, limit, userID));
     } catch (ApiException err) {
       return err.toResponse();
     }
   }
 
   @GetMapping("/posts/{id}/replies")
-  ResponseEntity<ApiResponse<List<SocialPost>>> replies(@PathVariable String id, @RequestParam(defaultValue = "20") int limit) {
+  ResponseEntity<ApiResponse<List<SocialPost>>> replies(@PathVariable String id, @RequestParam(defaultValue = "20") int limit, HttpServletRequest request) {
     try {
-      return ApiResponse.ok(social.listReplies(id, limit));
+      String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+      return ApiResponse.ok(social.listReplies(id, limit, userID));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -1784,7 +1787,7 @@ class SocialService {
     BootstrapPayload payload = new BootstrapPayload();
     payload.currentUser = Strings.hasText(currentUserID) ? findUser(currentUserID).orElse(null) : users.stream().findFirst().orElse(null);
     payload.stats = stats();
-    payload.feed = mine ? feedMine(limit, currentUserID) : feed(limit);
+    payload.feed = mine ? feedMine(limit, currentUserID) : feed(limit, currentUserID);
     payload.users = listUsers();
     payload.media = listMedia(limit);
     payload.conversations = listConversations(limit, currentUserID);
@@ -1869,15 +1872,23 @@ class SocialService {
     persistence.saveSocialSnapshot(snapshot());
   }
 
-  synchronized List<SocialPost> feed(int limit) {
-    return slice(posts.stream().filter(p -> !Strings.hasText(p.parentPostId)).sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed()).toList(), limit);
+  synchronized List<SocialPost> feed(int limit, String currentUserID) {
+    return slice(posts.stream()
+        .filter(p -> !Strings.hasText(p.parentPostId))
+        .filter(p -> canViewPost(p, currentUserID))
+        .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
+        .toList(), limit);
   }
 
   synchronized List<SocialPost> feedMine(int limit, String currentUserID) {
     if (!Strings.hasText(currentUserID)) {
       return List.of();
     }
-    return slice(posts.stream().filter(p -> !Strings.hasText(p.parentPostId) && currentUserID.equals(p.authorId)).sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed()).toList(), limit);
+    return slice(posts.stream()
+        .filter(p -> !Strings.hasText(p.parentPostId) && currentUserID.equals(p.authorId))
+        .filter(p -> canViewPost(p, currentUserID))
+        .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
+        .toList(), limit);
   }
 
   synchronized SocialPost createPost(CreatePostRequest req) {
@@ -1890,7 +1901,7 @@ class SocialService {
     post.instance = resolvePostInstance(req.instance, author.instance);
     post.kind = Strings.or(req.kind, Strings.hasText(req.parentPostId) ? "reply" : "post");
     post.content = Strings.value(req.content).trim();
-    post.visibility = Strings.or(req.visibility, "public");
+    post.visibility = normalizeVisibility(req.visibility);
     post.storageUri = Strings.or(req.storageUri, localStorageURI(req));
     post.attestationUri = Strings.value(req.attestationUri);
     post.tags = req.tags == null ? new ArrayList<>() : new ArrayList<>(req.tags);
@@ -1901,10 +1912,15 @@ class SocialService {
       }
     }
     post.type = Strings.or(req.type, "post");
-    post.interaction = Strings.or(req.interaction, "anyone");
+    post.interaction = normalizeInteraction(req.interaction);
     post.parentPostId = Strings.value(req.parentPostId);
     post.rootPostId = Strings.hasText(req.rootPostId) ? req.rootPostId : post.parentPostId;
     post.replyDepth = Strings.hasText(post.parentPostId) ? 1 : 0;
+    if (Strings.hasText(post.parentPostId)) {
+      SocialPost parent = getPost(post.parentPostId, author.id);
+      validateQuotePermission(parent, author.id);
+      post.rootPostId = Strings.hasText(post.rootPostId) ? post.rootPostId : parent.id;
+    }
     if (req.pollOptions != null && req.pollOptions.size() >= 2) {
       Poll poll = new Poll();
       poll.options = req.pollOptions.stream().filter(Strings::hasText).map(label -> new PollOption(label, 0)).toList();
@@ -1922,8 +1938,12 @@ class SocialService {
     return post;
   }
 
-  synchronized SocialPost getPost(String id) {
-    return findPost(id).orElseThrow(() -> ApiException.notFound("SOCIAL_POST_NOT_FOUND", "not_found", "post not found: " + id));
+  synchronized SocialPost getPost(String id, String currentUserID) {
+    SocialPost post = findPost(id).orElseThrow(() -> ApiException.notFound("SOCIAL_POST_NOT_FOUND", "not_found", "post not found: " + id));
+    if (!canViewPost(post, currentUserID)) {
+      throw ApiException.notFound("SOCIAL_POST_NOT_FOUND", "not_found", "post not found: " + id);
+    }
+    return post;
   }
 
   private String resolvePostInstance(String requestedInstance, String fallbackInstance) {
@@ -1944,25 +1964,26 @@ class SocialService {
     return resolved;
   }
 
-  synchronized PostThread getPostThread(String id, int limit) {
-    SocialPost post = getPost(id);
+  synchronized PostThread getPostThread(String id, int limit, String currentUserID) {
+    SocialPost post = getPost(id, currentUserID);
     PostThread thread = new PostThread();
     thread.post = post;
-    thread.ancestors = ancestors(post);
-    thread.replies = listReplies(id, limit);
+    thread.ancestors = ancestors(post).stream().filter(item -> canViewPost(item, currentUserID)).toList();
+    thread.replies = listReplies(id, limit, currentUserID);
     return thread;
   }
 
-  synchronized List<SocialPost> listReplies(String id, int limit) {
-    getPost(id);
+  synchronized List<SocialPost> listReplies(String id, int limit, String currentUserID) {
+    getPost(id, currentUserID);
     return slice(posts.stream()
         .filter(p -> id.equals(p.parentPostId) || id.equals(p.rootPostId))
+        .filter(p -> canViewPost(p, currentUserID))
         .sorted(Comparator.comparing(p -> p.createdAt))
         .toList(), limit);
   }
 
   synchronized SocialPost votePoll(String postID, String userID, List<Integer> optionIndices) {
-    SocialPost post = getPost(postID);
+    SocialPost post = getPost(postID, userID);
     if (post.poll == null) {
       throw ApiException.badRequest("SOCIAL_POLL_MISSING", "validation", "post has no poll");
     }
@@ -2360,6 +2381,51 @@ class SocialService {
 
   private Optional<SocialPost> findPost(String id) {
     return posts.stream().filter(p -> p.id.equals(id)).findFirst();
+  }
+
+  private boolean canViewPost(SocialPost post, String viewerID) {
+    if (!Strings.hasText(post.visibility)) return true;
+    if ("public".equals(post.visibility) || "unlisted".equals(post.visibility)) return true;
+    if (!Strings.hasText(viewerID)) return false;
+    if (viewerID.equals(post.authorId)) return true;
+    if ("private".equals(post.visibility)) return isFollowing(viewerID, post.authorId);
+    if ("direct".equals(post.visibility)) return isMentionedInPost(post, viewerID);
+    return true;
+  }
+
+  private boolean isFollowing(String followerID, String targetID) {
+    return follows.getOrDefault(followerID, Set.of()).contains(targetID);
+  }
+
+  private boolean isMentionedInPost(SocialPost post, String viewerID) {
+    Optional<SocialUser> viewer = findUser(viewerID);
+    if (viewer.isEmpty()) return false;
+    String handle = Strings.value(viewer.get().handle).toLowerCase(Locale.ROOT);
+    if (!Strings.hasText(handle)) return false;
+    return Strings.value(post.content).toLowerCase(Locale.ROOT).contains(handle);
+  }
+
+  private void validateQuotePermission(SocialPost parent, String actorID) {
+    String policy = normalizeInteraction(parent.interaction);
+    if ("anyone".equals(policy)) return;
+    if ("me".equals(policy) && !Objects.equals(parent.authorId, actorID)) {
+      throw ApiException.badRequest("SOCIAL_QUOTE_NOT_ALLOWED", "validation", "the post does not allow being quoted");
+    }
+    if ("followers".equals(policy) && !Objects.equals(parent.authorId, actorID) && !isFollowing(actorID, parent.authorId)) {
+      throw ApiException.badRequest("SOCIAL_QUOTE_NOT_ALLOWED", "validation", "the post allows quotes only from followers");
+    }
+  }
+
+  private String normalizeVisibility(String visibility) {
+    String value = Strings.or(visibility, "public");
+    if (Set.of("public", "unlisted", "private", "direct").contains(value)) return value;
+    return "public";
+  }
+
+  private String normalizeInteraction(String interaction) {
+    String value = Strings.or(interaction, "anyone");
+    if (Set.of("anyone", "followers", "me").contains(value)) return value;
+    return "anyone";
   }
 
   private List<SocialPost> ancestors(SocialPost post) {
