@@ -17,7 +17,6 @@ const error = ref('');
 const notice = ref('');
 
 // Form state
-const username = ref('');
 const displayName = ref('');
 const bio = ref('');
 const avatarUrl = ref('');
@@ -36,7 +35,6 @@ const showHint = ref(true);
 
 onMounted(() => {
   if (currentUser.value) {
-    username.value = currentUser.value.username || String(currentUser.value.handle || '').replace(/^@/, '');
     displayName.value = currentUser.value.displayName || '';
     bio.value = currentUser.value.bio || '';
     avatarUrl.value = currentUser.value.avatarUrl || '';
@@ -51,7 +49,6 @@ const hasChanges = computed(() => {
   if (!currentUser.value) return false;
   if (avatarFile.value || backgroundFile.value) return true;
   return displayName.value !== (currentUser.value.displayName || '') ||
-         username.value !== (currentUser.value.username || String(currentUser.value.handle || '').replace(/^@/, '')) ||
          bio.value !== (currentUser.value.bio || '') ||
          avatarUrl.value !== (currentUser.value.avatarUrl || '') ||
          backgroundUrl.value !== (currentUser.value.backgroundUrl || '') ||
@@ -68,7 +65,6 @@ async function handleSave() {
   notice.value = '';
   
   try {
-    const nextUsername = username.value.trim();
     let nextAvatarUrl = avatarUrl.value;
     let nextBackgroundUrl = backgroundUrl.value;
     if (avatarFile.value) {
@@ -79,7 +75,6 @@ async function handleSave() {
     }
 
     const updatedUser = await updateUserProfile(currentUser.value.id, {
-      username: nextUsername,
       displayName: displayName.value,
       bio: bio.value,
       avatarUrl: nextAvatarUrl,
@@ -89,7 +84,7 @@ async function handleSave() {
       isBot: isBot.value,
     });
     
-    updateCurrentUserLocally({ ...updatedUser, username: nextUsername });
+    updateCurrentUserLocally(updatedUser);
     avatarUrl.value = updatedUser.avatarUrl || '';
     backgroundUrl.value = updatedUser.backgroundUrl || '';
     clearAvatarPreview();
@@ -287,20 +282,6 @@ onUnmounted(() => {
 
     <!-- Form Sections -->
     <div class="space-y-8 pb-10">
-      <!-- Display Name -->
-      <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-8">
-        <div class="flex items-center justify-between mb-4">
-          <label class="text-sm font-bold text-[color:var(--text-primary)] uppercase tracking-wider">账号</label>
-          <Pencil class="w-4 h-4 text-[color:var(--text-muted)]" />
-        </div>
-        <input
-          v-model="username"
-          type="text"
-          class="w-full bg-transparent text-xl font-medium text-[color:var(--text-primary)] outline-none border-b border-[color:var(--border-color)] focus:border-emerald-500 transition-colors py-2"
-          placeholder="登录账号"
-        />
-      </div>
-
       <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-8">
         <div class="flex items-center justify-between mb-4">
           <label class="text-sm font-bold text-[color:var(--text-primary)] uppercase tracking-wider">显示名称</label>

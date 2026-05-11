@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ApiError, changePassword } from '../../api/authApi';
+import { updateUserProfile } from '../../api/socialApi';
 import { useAuth } from '../../composables/useAuth';
 
 type PrivacySettings = {
@@ -29,14 +30,27 @@ const notice = ref('');
 const changingPassword = ref(false);
 const passwordNotice = ref('');
 const passwordError = ref('');
+const accountNotice = ref('');
+const accountError = ref('');
+const savingAccount = ref(false);
 const passwordForm = ref({
   currentPassword: '',
   newPassword: '',
   confirmPassword: '',
 });
-const { currentUser } = useAuth();
+const { currentUser, updateCurrentUserLocally } = useAuth();
 const readonlyUsername = computed(() => String(currentUser.value?.username || currentUser.value?.handle || '').replace(/^@/, ''));
 const requireCurrentPassword = computed(() => currentUser.value?.requireCurrentPassword !== false);
+const editableUsername = ref('');
+watch(
+  () => readonlyUsername.value,
+  (value) => {
+    if (!editableUsername.value) {
+      editableUsername.value = value;
+    }
+  },
+  { immediate: true },
+);
 
 function loadSettings() {
   if (typeof window === 'undefined') return;
@@ -67,6 +81,32 @@ function saveSettings() {
 const hasChanges = computed(() => JSON.stringify(draft.value) !== JSON.stringify(saved.value));
 
 loadSettings();
+
+async function saveUsername() {
+  if (!currentUser.value || savingAccount.value) return;
+  accountNotice.value = '';
+  accountError.value = '';
+  const nextUsername = editableUsername.value.trim();
+  if (!nextUsername) {
+    accountError.value = '账号不能为空';
+    return;
+  }
+  savingAccount.value = true;
+  try {
+    await updateUserProfile(currentUser.value.id, { username: nextUsername });
+    updateCurrentUserLocally({ username: nextUsername });
+    editableUsername.value = nextUsername;
+    accountNotice.value = '账号已更新';
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'AUTH_USERNAME_TAKEN') {
+      accountError.value = '账号已被占用';
+    } else {
+      accountError.value = '账号更新失败，请稍后重试';
+    }
+  } finally {
+    savingAccount.value = false;
+  }
+}
 
 async function submitChangePassword() {
   passwordNotice.value = '';
@@ -239,12 +279,23 @@ async function submitChangePassword() {
         </div>
         <div class="mt-4">
           <div class="mb-2 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">账号</div>
-          <input
-            :value="readonlyUsername"
-            type="text"
-            readonly
-            class="w-full cursor-not-allowed rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-secondary)] opacity-80"
-          />
+          <div class="flex items-center gap-3">
+            <input
+              v-model="editableUsername"
+              type="text"
+              class="flex-1 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-primary)] outline-none focus:border-emerald-500/60"
+            />
+            <button
+              type="button"
+              :disabled="savingAccount || editableUsername.trim() === readonlyUsername"
+              @click="saveUsername"
+              class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {{ savingAccount ? '保存中...' : '保存账号' }}
+            </button>
+          </div>
+          <div v-if="accountNotice" class="mt-2 text-xs text-emerald-500">{{ accountNotice }}</div>
+          <div v-if="accountError" class="mt-2 text-xs text-rose-400">{{ accountError }}</div>
         </div>
         <form class="mt-4 grid gap-3 sm:grid-cols-2" @submit.prevent="submitChangePassword">
           <input
