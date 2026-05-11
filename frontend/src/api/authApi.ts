@@ -61,12 +61,34 @@ function createNoWalletError() {
   return new ApiError('No injected wallet found. Please install MetaMask or another EVM wallet.', 400, 'AUTH_WALLET_APP_MISSING', 'wallet');
 }
 
+type InjectedProvider = {
+  isMetaMask?: boolean;
+  providers?: InjectedProvider[];
+  request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
+};
+
+function resolveInjectedProvider(): InjectedProvider | null {
+  if (typeof window === 'undefined' || !window.ethereum) return null;
+
+  const root = window.ethereum as InjectedProvider;
+  const providers = Array.isArray(root.providers) ? root.providers : [];
+
+  if (providers.length > 0) {
+    const metaMask = providers.find((item) => item?.isMetaMask);
+    if (metaMask) return metaMask;
+    return providers[0] || null;
+  }
+
+  return root;
+}
+
 async function connectWallet() {
-  if (typeof window === 'undefined' || !window.ethereum) {
+  const injectedProvider = resolveInjectedProvider();
+  if (!injectedProvider) {
     throw createNoWalletError();
   }
 
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(injectedProvider);
   await provider.send('eth_requestAccounts', []);
   const signer = await provider.getSigner();
   const address = await signer.getAddress();

@@ -9,6 +9,11 @@ declare module '*.vue' {
 
 interface Window {
   ethereum?: {
+    isMetaMask?: boolean;
+    providers?: Array<{
+      isMetaMask?: boolean;
+      request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
+    }>;
     request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
   };
 }
