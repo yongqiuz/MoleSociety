@@ -171,10 +171,8 @@ function avatarText(name: string) {
               class="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] text-sm shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
             >
               <div class="py-1">
-                <button @click="emit('menu-action', 'openOriginal', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
-                <button @click="emit('menu-action', 'copyLink', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
                 <button @click="emit('menu-action', 'share', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
-                <button @click="emit('menu-action', 'embed', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
+                <button @click="emit('menu-action', 'mention', post)" class="w-full px-4 py-2.5 text-left hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { Bookmark, ChevronLeft, Heart, MessageCircle, Repeat } from 'lucide-vue-next';
+import { Bookmark, ChevronLeft, Heart, MessageCircle, MoreHorizontal, Repeat } from 'lucide-vue-next';
 import {
   fetchSocialBootstrap,
   fetchUser,
@@ -36,6 +36,7 @@ const relationView = ref<'posts' | 'followers' | 'following'>('posts');
 const relationUsers = ref<SocialUser[]>([]);
 const relationLoading = ref(false);
 const relationError = ref('');
+const openPostMenuId = ref('');
 
 const targetKey = computed(() => decodeURIComponent(String(route.params.id || '').trim()));
 const isSelfProfile = computed(() => {
@@ -65,12 +66,12 @@ function profileLabel(userInfo: SocialUser | null) {
 
 function relationTitle() {
   if (!user.value) return '';
-  return relationView.value === 'followers' ? `${user.displayName} 的关注者` : `${user.displayName} 的关注中`;
+  return relationView.value === 'followers' ? `${user.value.displayName} 的关注者` : `${user.value.displayName} 的关注中`;
 }
 
 function relationCount() {
   if (!user.value) return 0;
-  return relationView.value === 'followers' ? user.followers : user.following;
+  return relationView.value === 'followers' ? user.value.followers : user.value.following;
 }
 
 function formatTimestamp(input: string) {
@@ -229,6 +230,35 @@ function sharePost(postId: string) {
   void router.push({ path: '/app', query: { sharePost: postId } });
 }
 
+function postPublicUrl(postId: string) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  return `${origin}/app?post=${encodeURIComponent(postId)}`;
+}
+
+async function copyPostLink(postId: string) {
+  if (!postId || typeof window === 'undefined') return;
+  const url = postPublicUrl(postId);
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      return;
+    }
+  } catch {
+    // ignore and fallback
+  }
+  window.prompt('复制帖子链接', url);
+}
+
+async function handlePostMenuAction(action: 'share' | 'copy', postId: string) {
+  openPostMenuId.value = '';
+  if (!postId) return;
+  if (action === 'share') {
+    sharePost(postId);
+    return;
+  }
+  await copyPostLink(postId);
+}
+
 async function toggleFollow() {
   if (!user.value || isSelfProfile.value || followLoading.value) return;
   followLoading.value = true;
@@ -309,6 +339,7 @@ onMounted(() => {
 watch(
   () => route.params.id,
   () => {
+    openPostMenuId.value = '';
     void loadProfile();
   },
 );
@@ -401,7 +432,7 @@ watch(
           </div>
         </section>
 
-        <section v-if="relationView === 'posts'" class="overflow-hidden rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)]">
+        <section v-if="relationView === 'posts'" class="overflow-visible rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)]">
           <div class="border-b border-[color:var(--border-color)] px-6 py-4 text-base font-semibold text-[color:var(--text-primary)]">最近帖子</div>
           <div v-if="posts.length === 0" class="px-6 py-12 text-center text-sm text-[color:var(--text-muted)]">
             暂无公开帖子
@@ -462,6 +493,31 @@ watch(
                   >
                     <Bookmark :class="{ 'fill-current': bookmarkedPosts[post.id] }" class="mr-1.5 h-[18px] w-[18px]" />
                   </button>
+                  <div class="relative ml-auto">
+                    <button
+                      @click="openPostMenuId = openPostMenuId === post.id ? '' : post.id"
+                      class="inline-flex items-center rounded-lg px-2 py-1.5 text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                    >
+                      <MoreHorizontal class="h-5 w-5" />
+                    </button>
+                    <div
+                      v-if="openPostMenuId === post.id"
+                      class="absolute right-0 top-full z-30 mt-2 w-44 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] text-sm shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
+                    >
+                      <button
+                        @click="handlePostMenuAction('share', post.id)"
+                        class="w-full px-4 py-2.5 text-left text-[color:var(--text-primary)] hover:bg-[var(--panel-soft)]"
+                      >
+                        分享
+                      </button>
+                      <button
+                        @click="handlePostMenuAction('copy', post.id)"
+                        class="w-full px-4 py-2.5 text-left text-[color:var(--text-primary)] hover:bg-[var(--panel-soft)]"
+                      >
+                        复制链接
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

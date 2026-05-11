@@ -2352,21 +2352,8 @@ watch(
                         class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
                       >
                         <div class="py-1">
-                          <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
-                          <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
                           <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
-                          <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
-                        </div>
-                        <div class="border-t border-[color:var(--border-color)] py-1">
                           <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
-                        </div>
-                        <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
-                          <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏 {{ post.handle }}</button>
-                          <button @click="handleMenuAction('block', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">屏蔽 {{ post.handle }}</button>
-                          <button @click="handleMenuAction('report', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">举报 {{ post.handle }}</button>
-                        </div>
-                        <div class="border-t border-[color:var(--border-color)] py-1">
-                          <button @click="handleMenuAction('blockInstance', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 text-rose-500 font-medium">屏蔽 {{ post.instance }} 实例</button>
                         </div>
                       </div>
                     </div>
@@ -2925,13 +2912,8 @@ watch(
                             class="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 text-sm overflow-hidden"
                           >
                             <div class="py-1">
-                              <button @click="handleMenuAction('openOriginal', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">打开原始页面</button>
-                              <button @click="handleMenuAction('copyLink', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">复制摩文链接</button>
                               <button @click="handleMenuAction('share', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">分享</button>
-                              <button @click="handleMenuAction('embed', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)]">获取嵌入代码</button>
-                            </div>
-                            <div class="border-t border-[color:var(--border-color)] py-1 flex flex-col items-start text-rose-500 font-medium">
-                              <button @click="handleMenuAction('hide', post)" class="w-full text-left px-4 py-2.5 hover:bg-rose-500/10 hover:text-rose-400">隐藏此新闻</button>
+                              <button @click="handleMenuAction('mention', post)" class="w-full text-left px-4 py-2.5 hover:bg-[var(--panel-soft)] text-[color:var(--text-primary)] font-medium">提及 {{ post.handle }}</button>
                             </div>
                           </div>
                         </div>
