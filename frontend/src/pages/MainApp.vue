@@ -218,6 +218,8 @@ const selectedConversationId = ref('');
 const mediaPreview = ref<string | null>(null);
 const mediaMeta = ref<{ name: string; sizeLabel: string; type: string; sizeBytes: number } | null>(null);
 const replyDraft = ref('');
+const replyMediaPreview = ref<string | null>(null);
+const replyMediaMeta = ref<{ name: string; sizeLabel: string; type: string; sizeBytes: number } | null>(null);
 const messageListRef = ref<HTMLElement | null>(null);
 const loading = ref(true);
 const saving = ref(false);
@@ -246,11 +248,17 @@ const threadAncestors = ref<FeedCard[]>([]);
 const threadReplies = ref<FeedCard[]>([]);
 const activeReplyTarget = ref<FeedCard | null>(null);
 const replyTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const replyFileInputRef = ref<HTMLInputElement | null>(null);
 const postComposerRef = ref<HTMLTextAreaElement | null>(null);
 const emojiPickerPanelRef = ref<HTMLElement | null>(null);
 const emojiTriggerRef = ref<HTMLElement | null>(null);
 const postSelectionStart = ref(0);
 const postSelectionEnd = ref(0);
+const replySelectionStart = ref(0);
+const replySelectionEnd = ref(0);
+const showReplyEmojiPicker = ref(false);
+const replyEmojiPickerPanelRef = ref<HTMLElement | null>(null);
+const replyEmojiTriggerRef = ref<HTMLElement | null>(null);
 const processingMessageIntent = ref(false);
 const notificationFeed = ref<NotificationItem[]>([]);
 const relationUsers = ref<SocialUser[]>([]);
@@ -366,6 +374,7 @@ const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
 const MENTION_READ_STORAGE_PREFIX = 'mole-mention-read';
 
 const isLoggedIn = computed(() => !!authSession.value);
+const isReplyingRoot = computed(() => !!threadFocusPost.value && activeReplyTarget.value?.id === threadFocusPost.value.id);
 
 const { themeStyles, appearanceSettings } = useAppearance();
 
@@ -970,6 +979,22 @@ function findPersonById(userId: string) {
   return people.value.find((item) => item.id === userId) ?? null;
 }
 
+function hydrateFeedCardAuthor(post: FeedCard): FeedCard {
+  const person = findPersonById(post.authorId);
+  if (!person) return post;
+  return {
+    ...post,
+    author: person.displayName || post.author,
+    handle: person.handle || post.handle,
+    bio: person.bio || post.bio,
+    instance: person.instance || post.instance,
+  };
+}
+
+function hydrateFeedCardList(items: FeedCard[]) {
+  return items.map(hydrateFeedCardAuthor);
+}
+
 function userAvatarUrl(userId: string) {
   return findPersonById(userId)?.avatarUrl || '';
 }
@@ -1021,13 +1046,13 @@ function goToLogout() {
 
 function toFeedCard(post: SocialPost): FeedCard {
   const firstMedia = Array.isArray(post.media) ? post.media[0] : undefined;
-  const person = people.value.find((item) => item.id === post.authorId);
+  const person = findPersonById(post.authorId);
   return {
     id: post.id,
     authorId: post.authorId,
-    author: post.authorName,
-    handle: post.authorHandle,
-    instance: post.instance,
+    author: person?.displayName || post.authorName,
+    handle: person?.handle || post.authorHandle,
+    instance: person?.instance || post.instance,
     kind: post.kind || (post.parentPostId ? 'reply' : 'post'),
     parentPostId: post.parentPostId,
     rootPostId: post.rootPostId,
@@ -1247,7 +1272,7 @@ async function startConversation(targetUser: SocialUser) {
 function applyBootstrap(payload: BootstrapPayload) {
   currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? null;
   people.value = payload.users;
-  posts.value = payload.feed.map(toFeedCard);
+  posts.value = hydrateFeedCardList(payload.feed.map(toFeedCard));
   assets.value = payload.media.map(toAssetCard);
   const mappedConversations = payload.conversations.map((conversation) =>
     toConversationCard(conversation, currentUser.value?.id ?? null),
@@ -1256,6 +1281,19 @@ function applyBootstrap(payload: BootstrapPayload) {
   instances.value = payload.instances;
   selectedConversationId.value = conversations.value[0]?.id ?? '';
 }
+
+watch([people, currentUser], () => {
+  posts.value = hydrateFeedCardList(posts.value);
+  myPosts.value = hydrateFeedCardList(myPosts.value);
+  threadAncestors.value = hydrateFeedCardList(threadAncestors.value);
+  threadReplies.value = hydrateFeedCardList(threadReplies.value);
+  if (threadFocusPost.value) {
+    threadFocusPost.value = hydrateFeedCardAuthor(threadFocusPost.value);
+  }
+  if (activeReplyTarget.value) {
+    activeReplyTarget.value = hydrateFeedCardAuthor(activeReplyTarget.value);
+  }
+});
 
 async function loadMyFeed() {
   if (!authSession.value) {
@@ -1316,6 +1354,11 @@ function bumpReplyCount(postId: string) {
 }
 
 function setReplyTarget(target: FeedCard) {
+  if (activeReplyTarget.value?.id !== target.id) {
+    replyDraft.value = '';
+    clearReplyMedia();
+    showReplyEmojiPicker.value = false;
+  }
   activeReplyTarget.value = target;
   void focusReplyComposer();
 }
@@ -1539,6 +1582,8 @@ async function openPostDetail(postId: string, focusComposer = true) {
   threadLoading.value = true;
   threadError.value = '';
   replyDraft.value = '';
+  clearReplyMedia();
+  showReplyEmojiPicker.value = false;
   activeReplyTarget.value = null;
   threadFocusPost.value = null;
   threadAncestors.value = [];
@@ -1567,15 +1612,30 @@ async function openPostDetail(postId: string, focusComposer = true) {
 }
 
 async function submitReply() {
-  if (!replyDraft.value.trim() || !currentUser.value || !threadFocusPost.value || !activeReplyTarget.value || saving.value) return;
+  if ((!replyDraft.value.trim() && !replyMediaPreview.value) || !currentUser.value || !threadFocusPost.value || !activeReplyTarget.value || saving.value) return;
 
   const targetPost = activeReplyTarget.value;
   const rootPostId = threadFocusPost.value.rootPostId || threadFocusPost.value.id;
+  const pendingTargetId = targetPost.id;
   saving.value = true;
   try {
     if (!apiOnline.value) {
       goToNotFound();
       return;
+    }
+
+    let createdAsset: AssetCard | null = null;
+    if (replyMediaPreview.value && replyMediaMeta.value) {
+      createdAsset = await createMediaAsset({
+        ownerId: currentUser.value.id,
+        name: replyMediaMeta.value.name,
+        kind: replyMediaMeta.value.type.startsWith('video') ? 'video' : 'image',
+        url: replyMediaPreview.value,
+        storageUri: `media://reply/${Date.now()}`,
+        cid: `cid_${Date.now()}`,
+        sizeBytes: replyMediaMeta.value.sizeBytes,
+        status: 'ready',
+      }).then(toAssetCard);
     }
 
     await createPost({
@@ -1588,7 +1648,7 @@ async function submitReply() {
       storageUri: `draft://reply/${Date.now()}`,
       attestationUri: `attestation://reply/${Date.now()}`,
       tags: targetPost.tags.slice(0, 3),
-      mediaIds: [],
+      mediaIds: createdAsset ? [createdAsset.id] : [],
       parentPostId: targetPost.id,
       rootPostId,
       type: 'post',
@@ -1597,7 +1657,13 @@ async function submitReply() {
     await openPostDetail(selectedPostId.value || rootPostId);
 
     replyDraft.value = '';
-    activeReplyTarget.value = threadFocusPost.value;
+    clearReplyMedia();
+    if (threadFocusPost.value?.id === pendingTargetId) {
+      activeReplyTarget.value = threadFocusPost.value;
+    } else {
+      const nextTarget = threadReplies.value.find((post) => post.id === pendingTargetId);
+      activeReplyTarget.value = nextTarget || threadFocusPost.value;
+    }
     errorMessage.value = '';
     threadError.value = '';
     await focusReplyComposer();
@@ -1674,6 +1740,30 @@ function handleMediaChange(event: Event) {
 function clearMedia() {
   mediaPreview.value = null;
   mediaMeta.value = null;
+}
+
+function handleReplyMediaChange(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : null;
+    replyMediaPreview.value = result;
+    replyMediaMeta.value = {
+      name: file.name,
+      sizeLabel: formatBytes(file.size),
+      type: file.type || 'image',
+      sizeBytes: file.size,
+    };
+  };
+  reader.readAsDataURL(file);
+  target.value = '';
+}
+
+function clearReplyMedia() {
+  replyMediaPreview.value = null;
+  replyMediaMeta.value = null;
 }
 
 function toggleFollow(userId: string) {
@@ -1811,6 +1901,13 @@ function syncPostCursor(event?: Event) {
   postSelectionEnd.value = target.selectionEnd ?? postDraft.value.length;
 }
 
+function syncReplyCursor(event?: Event) {
+  const target = (event?.target as HTMLTextAreaElement | undefined) ?? replyTextareaRef.value;
+  if (!target) return;
+  replySelectionStart.value = target.selectionStart ?? replyDraft.value.length;
+  replySelectionEnd.value = target.selectionEnd ?? replyDraft.value.length;
+}
+
 function toggleEmojiPicker() {
   showEmojiPicker.value = !showEmojiPicker.value;
   if (showEmojiPicker.value) {
@@ -1844,13 +1941,49 @@ async function handleEmojiPick(event: Event) {
   showEmojiPicker.value = false;
 }
 
+function toggleReplyEmojiPicker() {
+  showReplyEmojiPicker.value = !showReplyEmojiPicker.value;
+  if (showReplyEmojiPicker.value) {
+    syncReplyCursor();
+  }
+}
+
+async function insertReplyEmojiAtCursor(emoji: string) {
+  if (!emoji) return;
+  const start = replySelectionStart.value;
+  const end = replySelectionEnd.value;
+  replyDraft.value = `${replyDraft.value.slice(0, start)}${emoji}${replyDraft.value.slice(end)}`;
+  const nextPos = start + emoji.length;
+  replySelectionStart.value = nextPos;
+  replySelectionEnd.value = nextPos;
+  await nextTick();
+  if (replyTextareaRef.value) {
+    replyTextareaRef.value.focus();
+    replyTextareaRef.value.setSelectionRange(nextPos, nextPos);
+  }
+}
+
+async function handleReplyEmojiPick(event: Event) {
+  const detail = (event as Event & { detail?: { unicode?: string; emoji?: { unicode?: string } | string } }).detail;
+  const unicode = detail?.unicode || (typeof detail?.emoji === 'string' ? detail.emoji : detail?.emoji?.unicode) || '';
+  if (!unicode) return;
+  await insertReplyEmojiAtCursor(unicode);
+  showReplyEmojiPicker.value = false;
+}
+
 function handleDocumentClick(event: MouseEvent) {
-  if (!showEmojiPicker.value) return;
   const target = event.target as Node | null;
   if (!target) return;
-  if (emojiPickerPanelRef.value?.contains(target)) return;
-  if (emojiTriggerRef.value?.contains(target)) return;
-  showEmojiPicker.value = false;
+  if (showEmojiPicker.value) {
+    if (!emojiPickerPanelRef.value?.contains(target) && !emojiTriggerRef.value?.contains(target)) {
+      showEmojiPicker.value = false;
+    }
+  }
+  if (showReplyEmojiPicker.value) {
+    if (!replyEmojiPickerPanelRef.value?.contains(target) && !replyEmojiTriggerRef.value?.contains(target)) {
+      showReplyEmojiPicker.value = false;
+    }
+  }
 }
 
 function addPollOption() {
@@ -2733,7 +2866,7 @@ watch(
                 </div>
               </article>
 
-              <div ref="replyComposerRef" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+              <div v-if="isReplyingRoot" ref="replyComposerRef" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
                 <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-5">
                   <div class="flex items-start gap-4">
                     <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
@@ -2769,22 +2902,48 @@ watch(
                       <textarea
                         ref="replyTextareaRef"
                         v-model="replyDraft"
+                        @click="syncReplyCursor"
+                        @keyup="syncReplyCursor"
+                        @select="syncReplyCursor"
                         rows="4"
                         maxlength="500"
                         placeholder="写下你的看法，让讨论继续发生"
                         class="w-full resize-none rounded-2xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-4 py-4 text-base leading-7 text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
                       />
+                      <div v-if="replyMediaPreview && replyMediaMeta" class="relative mt-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] group">
+                        <img :src="replyMediaPreview" :alt="replyMediaMeta.name" class="max-h-48 w-full object-contain bg-[var(--panel-contrast)]" />
+                        <button
+                          type="button"
+                          @click="clearReplyMedia"
+                          class="absolute right-2 top-2 rounded-full bg-black/60 p-1 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                          title="移除图片"
+                        >
+                          <X class="w-4 h-4" />
+                        </button>
+                      </div>
                       <div class="mt-4 flex items-center justify-between gap-4">
+                        <div class="flex items-center gap-2">
+                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
+                            <ImageIcon class="w-4 h-4 text-cyan-300" />
+                            <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
+                          </label>
+                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                            <Smile class="w-4 h-4" />
+                          </button>
+                        </div>
                         <div class="text-sm text-[color:var(--text-muted)]">
                           {{ replyDraft.trim().length }}/500
                         </div>
                         <button
-                          :disabled="!replyDraft.trim() || saving"
+                          :disabled="(!replyDraft.trim() && !replyMediaPreview) || saving"
                           @click="submitReply"
                           class="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {{ saving ? '发送中...' : '发送回复' }}
                         </button>
+                      </div>
+                      <div v-if="showReplyEmojiPicker" ref="replyEmojiPickerPanelRef" @click.stop class="mt-3 rounded-2xl border border-yellow-400/20 bg-[var(--panel-bg)] p-2">
+                        <emoji-picker @emoji-click="handleReplyEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
                       </div>
                     </div>
                   </div>
@@ -2833,6 +2992,38 @@ watch(
                         <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> 回复
                       </button>
                     </div>
+                    <div v-if="activeReplyTarget?.id === group.parent.id && !isReplyingRoot" class="mt-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] p-4">
+                      <textarea
+                        ref="replyTextareaRef"
+                        v-model="replyDraft"
+                        @click="syncReplyCursor"
+                        @keyup="syncReplyCursor"
+                        @select="syncReplyCursor"
+                        rows="3"
+                        maxlength="500"
+                        placeholder="回复这条评论"
+                        class="w-full resize-none rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-3 py-3 text-sm text-[color:var(--text-primary)] outline-none"
+                      />
+                      <div v-if="replyMediaPreview && replyMediaMeta" class="relative mt-3 overflow-hidden rounded-xl border border-[color:var(--border-color)]">
+                        <img :src="replyMediaPreview" :alt="replyMediaMeta.name" class="max-h-40 w-full object-contain bg-[var(--panel-contrast)]" />
+                        <button type="button" @click="clearReplyMedia" class="absolute right-2 top-2 rounded-full bg-black/60 p-1 text-white"><X class="w-4 h-4" /></button>
+                      </div>
+                      <div class="mt-3 flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                          <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
+                            <ImageIcon class="w-4 h-4 text-cyan-300" />
+                            <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
+                          </label>
+                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                            <Smile class="w-4 h-4" />
+                          </button>
+                        </div>
+                        <button :disabled="(!replyDraft.trim() && !replyMediaPreview) || saving" @click="submitReply" class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{{ saving ? '发送中...' : '发送' }}</button>
+                      </div>
+                      <div v-if="showReplyEmojiPicker" ref="replyEmojiPickerPanelRef" @click.stop class="mt-3 rounded-2xl border border-yellow-400/20 bg-[var(--panel-bg)] p-2">
+                        <emoji-picker @emoji-click="handleReplyEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
+                      </div>
+                    </div>
 
                     <div v-if="group.children.length" class="mt-4 border-t border-[color:var(--border-color)]/70 pt-4">
                       <div
@@ -2861,6 +3052,38 @@ watch(
                           >
                             <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> 回复
                           </button>
+                        </div>
+                        <div v-if="activeReplyTarget?.id === child.post.id" class="mt-4 rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] p-4">
+                          <textarea
+                            ref="replyTextareaRef"
+                            v-model="replyDraft"
+                            @click="syncReplyCursor"
+                            @keyup="syncReplyCursor"
+                            @select="syncReplyCursor"
+                            rows="3"
+                            maxlength="500"
+                            placeholder="回复这条评论"
+                            class="w-full resize-none rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-3 text-sm text-[color:var(--text-primary)] outline-none"
+                          />
+                          <div v-if="replyMediaPreview && replyMediaMeta" class="relative mt-3 overflow-hidden rounded-xl border border-[color:var(--border-color)]">
+                            <img :src="replyMediaPreview" :alt="replyMediaMeta.name" class="max-h-40 w-full object-contain bg-[var(--panel-contrast)]" />
+                            <button type="button" @click="clearReplyMedia" class="absolute right-2 top-2 rounded-full bg-black/60 p-1 text-white"><X class="w-4 h-4" /></button>
+                          </div>
+                          <div class="mt-3 flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                              <label class="cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-cyan-400/10" title="添加图片">
+                                <ImageIcon class="w-4 h-4 text-cyan-300" />
+                                <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
+                              </label>
+                              <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                                <Smile class="w-4 h-4" />
+                              </button>
+                            </div>
+                            <button :disabled="(!replyDraft.trim() && !replyMediaPreview) || saving" @click="submitReply" class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{{ saving ? '发送中...' : '发送' }}</button>
+                          </div>
+                          <div v-if="showReplyEmojiPicker" ref="replyEmojiPickerPanelRef" @click.stop class="mt-3 rounded-2xl border border-yellow-400/20 bg-[var(--panel-bg)] p-2">
+                            <emoji-picker @emoji-click="handleReplyEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
+                          </div>
                         </div>
                       </div>
                     </div>
