@@ -306,6 +306,47 @@ const threadedReplies = computed(() => {
   walk(rootKey, 2);
   return flattened;
 });
+const twoLevelReplies = computed(() => {
+  const flattened = threadedReplies.value;
+  const byId = new Map(flattened.map((item) => [item.post.id, item.post]));
+  const groups: Array<{ parent: FeedCard; children: Array<{ post: FeedCard; replyTo?: FeedCard | null }> }> = [];
+  const groupByParentId = new Map<string, { parent: FeedCard; children: Array<{ post: FeedCard; replyTo?: FeedCard | null }> }>();
+
+  for (const item of flattened) {
+    if (item.depth <= 2) {
+      const group = { parent: item.post, children: [] as Array<{ post: FeedCard; replyTo?: FeedCard | null }> };
+      groups.push(group);
+      groupByParentId.set(item.post.id, group);
+    }
+  }
+
+  if (groups.length === 0) {
+    for (const item of flattened) {
+      const group = { parent: item.post, children: [] as Array<{ post: FeedCard; replyTo?: FeedCard | null }> };
+      groups.push(group);
+      groupByParentId.set(item.post.id, group);
+    }
+  }
+
+  for (const item of flattened) {
+    if (item.depth <= 2) continue;
+    const directParentId = String(item.post.parentPostId || '').trim();
+    const directParent = byId.get(directParentId) || null;
+    let anchorParentId = directParentId;
+    while (anchorParentId) {
+      const anchor = byId.get(anchorParentId);
+      if (!anchor) break;
+      const anchorDepth = flattened.find((x) => x.post.id === anchor.id)?.depth ?? 3;
+      if (anchorDepth <= 2) break;
+      anchorParentId = String(anchor.parentPostId || '').trim();
+    }
+    const group = groupByParentId.get(anchorParentId) || groups[0];
+    if (!group) continue;
+    group.children.push({ post: item.post, replyTo: directParent });
+  }
+
+  return groups;
+});
 const route = useRoute();
 const router = useRouter();
 const { session: authSession } = useAuth();
@@ -1523,11 +1564,6 @@ async function openPostDetail(postId: string, focusComposer = true) {
   } finally {
     threadLoading.value = false;
   }
-}
-
-function replyOffset(depth: number) {
-  const normalized = Math.max(2, depth);
-  return `${Math.min(normalized - 2, 4) * 28}px`;
 }
 
 async function submitReply() {
@@ -2771,59 +2807,62 @@ watch(
 
                 <div v-else class="space-y-4">
                   <article
-                    v-for="item in threadedReplies"
-                    :key="item.post.id"
+                    v-for="group in twoLevelReplies"
+                    :key="group.parent.id"
                     class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-5"
-                    :style="{ marginLeft: replyOffset(item.depth) }"
                   >
                     <div class="flex items-center gap-2 text-sm">
                       <button
-                        @click="goToUserProfile(item.post.authorId)"
+                        @click="goToUserProfile(group.parent.authorId)"
                         class="font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
                       >
-                        {{ item.post.author }}
+                        {{ group.parent.author }}
                       </button>
-                      <span class="text-[color:var(--text-secondary)]">@{{ item.post.instance }}</span>
-                      <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">
-                        第 {{ item.depth }} 层
-                      </span>
-                      <span class="text-[color:var(--text-muted)]">{{ item.post.time }}</span>
+                      <span class="text-[color:var(--text-secondary)]">@{{ group.parent.instance }}</span>
+                      <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">第 2 层</span>
+                      <span class="text-[color:var(--text-muted)]">{{ group.parent.time }}</span>
                     </div>
                     <div class="mt-3 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
-                      {{ item.post.content }}
-                    </div>
-                    <div v-if="item.post.tags.length" class="mt-4 flex flex-wrap gap-2">
-                      <span v-for="tag in item.post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
-                        #{{ tag }}
-                      </span>
+                      {{ group.parent.content }}
                     </div>
                     <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
                       <button
-                        @click="setReplyTarget(item.post)"
+                        @click="setReplyTarget(group.parent)"
                         class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
                       >
-                        <MessageCircle class="w-[18px] h-[18px] mr-1.5" />
+                        <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> 回复
                       </button>
-                      <button
-                        @click="openPostDetail(item.post.id)"
-                        class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                    </div>
+
+                    <div v-if="group.children.length" class="mt-4 border-t border-[color:var(--border-color)]/70 pt-4">
+                      <div
+                        v-for="child in group.children"
+                        :key="child.post.id"
+                        class="ml-6 mb-3 rounded-2xl border border-[color:var(--border-color)]/70 bg-[var(--frame-bg)] px-4 py-4 last:mb-0"
                       >
-                        <List class="w-[18px] h-[18px] mr-1.5" />
-                      </button>
-                      <button
-                        @click="toggleLike(item.post.id)"
-                        class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                        :class="likedPosts[item.post.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
-                      >
-                        <Heart :class="{'fill-current': likedPosts[item.post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ item.post.stats.likes + (likedPosts[item.post.id] ? 1 : 0) || '' }}
-                      </button>
-                      <button
-                        @click="toggleBookmark(item.post.id)"
-                        class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                        :class="bookmarkedPosts[item.post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
-                      >
-                        <Bookmark :class="{'fill-current': bookmarkedPosts[item.post.id]}" class="w-[18px] h-[18px] mr-1.5" />
-                      </button>
+                        <div class="flex items-center gap-2 text-sm">
+                          <button
+                            @click="goToUserProfile(child.post.authorId)"
+                            class="font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                          >
+                            {{ child.post.author }}
+                          </button>
+                          <span class="text-[color:var(--text-secondary)]">@{{ child.post.instance }}</span>
+                          <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">第 3 层</span>
+                          <span class="text-[color:var(--text-muted)]">{{ child.post.time }}</span>
+                        </div>
+                        <div class="mt-2 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
+                          <span v-if="child.replyTo" class="mr-1 text-emerald-400">回复 @{{ child.replyTo.author }}：</span>{{ child.post.content }}
+                        </div>
+                        <div class="mt-3 flex flex-wrap items-center gap-3 text-sm">
+                          <button
+                            @click="setReplyTarget(child.post)"
+                            class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                          >
+                            <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> 回复
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </article>
                 </div>
