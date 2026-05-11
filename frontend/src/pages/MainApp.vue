@@ -11,8 +11,12 @@ import {
   fetchPostThread,
   fetchSocialBootstrap,
   fetchSocialBootstrapMine,
+  fetchUserFollowers,
+  fetchUserFollowing,
+  followUser,
   getConversation,
   listConversations,
+  unfollowUser,
   updateUserProfile,
   voteOnPoll,
   type BootstrapPayload,
@@ -48,6 +52,8 @@ type Section =
   | 'likes'
   | 'bookmarks'
   | 'mentions'
+  | 'followers'
+  | 'following'
   | 'preferences'
   | 'more';
 
@@ -131,6 +137,12 @@ type MessageCard = {
     instance: string;
     content: string;
     createdAt?: string;
+    media?: {
+      name: string;
+      preview: string;
+      type: string;
+      sizeLabel: string;
+    };
   } | null;
   assetUri?: string;
   chainId?: string;
@@ -241,6 +253,59 @@ const postSelectionStart = ref(0);
 const postSelectionEnd = ref(0);
 const processingMessageIntent = ref(false);
 const notificationFeed = ref<NotificationItem[]>([]);
+const relationUsers = ref<SocialUser[]>([]);
+const relationLoading = ref(false);
+const relationError = ref('');
+const followActionLoading = ref<Record<string, boolean>>({});
+
+const threadedReplies = computed(() => {
+  const root = threadFocusPost.value;
+  if (!root) {
+    return threadReplies.value.map((post) => ({ post, depth: Math.max(2, (post.replyDepth ?? 1) + 1) }));
+  }
+
+  const items = [...threadReplies.value];
+  const byId = new Map(items.map((post) => [post.id, post]));
+  const children = new Map<string, FeedCard[]>();
+  const rootKey = root.id;
+
+  const pushChild = (parentId: string, post: FeedCard) => {
+    const bucket = children.get(parentId);
+    if (bucket) bucket.push(post);
+    else children.set(parentId, [post]);
+  };
+
+  for (const post of items) {
+    const parentId = String(post.parentPostId || '').trim();
+    if (!parentId || parentId === rootKey || !byId.has(parentId)) {
+      pushChild(rootKey, post);
+      continue;
+    }
+    pushChild(parentId, post);
+  }
+
+  const toSortTime = (post: FeedCard) => {
+    const raw = post.createdAt || '';
+    const ts = raw ? Date.parse(raw) : NaN;
+    return Number.isNaN(ts) ? 0 : ts;
+  };
+
+  for (const [, arr] of children.entries()) {
+    arr.sort((a, b) => toSortTime(a) - toSortTime(b) || a.id.localeCompare(b.id));
+  }
+
+  const flattened: Array<{ post: FeedCard; depth: number }> = [];
+  const walk = (parentId: string, depth: number) => {
+    const bucket = children.get(parentId) || [];
+    for (const post of bucket) {
+      flattened.push({ post, depth });
+      walk(post.id, depth + 1);
+    }
+  };
+
+  walk(rootKey, 2);
+  return flattened;
+});
 const route = useRoute();
 const router = useRouter();
 const { session: authSession } = useAuth();
@@ -775,7 +840,15 @@ function toForwardedPostBody(post: FeedCard) {
     handle: post.handle,
     instance: post.instance,
     content: post.content,
-    createdAt: post.time,
+    createdAt: post.createdAt || post.time,
+    media: post.media
+      ? {
+          name: post.media.name,
+          preview: post.media.preview,
+          type: post.media.type,
+          sizeLabel: post.media.sizeLabel,
+        }
+      : null,
   };
   return `${FORWARDED_POST_PREFIX}${JSON.stringify(payload)}`;
 }
@@ -793,10 +866,23 @@ function parseForwardedPostBody(text: string) {
       instance: String(parsed.instance || ''),
       content: String(parsed.content || ''),
       createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : '',
+      media: parsed.media && typeof parsed.media === 'object'
+        ? {
+            name: String(parsed.media.name || ''),
+            preview: String(parsed.media.preview || ''),
+            type: String(parsed.media.type || 'image'),
+            sizeLabel: String(parsed.media.sizeLabel || ''),
+          }
+        : undefined,
     };
   } catch {
     return null;
   }
+}
+
+function openForwardedPostDetail(message: MessageCard) {
+  if (!message.forwardedPost?.id) return;
+  void openPostDetail(message.forwardedPost.id, false);
 }
 
 // toneClass removed - moved to AppearanceSettings.vue
@@ -1439,9 +1525,9 @@ async function openPostDetail(postId: string, focusComposer = true) {
   }
 }
 
-function replyOffset(post: FeedCard) {
-  const depth = Math.max(0, post.replyDepth ?? 0);
-  return `${Math.min(depth, 4) * 28}px`;
+function replyOffset(depth: number) {
+  const normalized = Math.max(2, depth);
+  return `${Math.min(normalized - 2, 4) * 28}px`;
 }
 
 async function submitReply() {
@@ -1559,6 +1645,50 @@ function toggleFollow(userId: string) {
     ...followedUsers.value,
     [userId]: !followedUsers.value[userId],
   };
+}
+
+async function loadRelationUsers(type: 'followers' | 'following') {
+  if (!currentUser.value?.id) return;
+  relationLoading.value = true;
+  relationError.value = '';
+  try {
+    relationUsers.value = type === 'followers'
+      ? await fetchUserFollowers(currentUser.value.id, 200)
+      : await fetchUserFollowing(currentUser.value.id, 200);
+    if (type === 'following') {
+      const next = { ...followedUsers.value };
+      relationUsers.value.forEach((item) => {
+        next[item.id] = true;
+      });
+      followedUsers.value = next;
+    }
+  } catch {
+    relationUsers.value = [];
+    relationError.value = '加载列表失败，请稍后重试';
+  } finally {
+    relationLoading.value = false;
+  }
+}
+
+async function openRelationSection(type: 'followers' | 'following') {
+  currentSection.value = type;
+  await loadRelationUsers(type);
+}
+
+async function toggleFollowRelationUser(userId: string) {
+  if (!userId || followActionLoading.value[userId]) return;
+  followActionLoading.value = { ...followActionLoading.value, [userId]: true };
+  const next = !followedUsers.value[userId];
+  try {
+    if (next) {
+      await followUser(userId);
+    } else {
+      await unfollowUser(userId);
+    }
+    followedUsers.value = { ...followedUsers.value, [userId]: next };
+  } finally {
+    followActionLoading.value = { ...followActionLoading.value, [userId]: false };
+  }
 }
 
 function goToUserProfile(userId: string) {
@@ -1974,12 +2104,22 @@ watch(
 
             <div class="flex items-center justify-between rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-2 text-[11px]">
               <div class="flex items-center gap-3 text-[color:var(--text-secondary)]">
-                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.followers ?? 0 }}</strong> 关注者</span>
-                <span><strong class="text-[color:var(--text-primary)]">{{ currentUser?.following ?? 0 }}</strong> 关注中</span>
+                <button
+                  @click="openRelationSection('followers')"
+                  class="rounded-md px-1.5 py-0.5 transition hover:bg-[var(--chip-hover)]"
+                >
+                  <strong class="text-[color:var(--text-primary)]">{{ currentUser?.followers ?? 0 }}</strong> 关注者
+                </button>
+                <button
+                  @click="openRelationSection('following')"
+                  class="rounded-md px-1.5 py-0.5 transition hover:bg-[var(--chip-hover)]"
+                >
+                  <strong class="text-[color:var(--text-primary)]">{{ currentUser?.following ?? 0 }}</strong> 关注中
+                </button>
               </div>
               <div class="flex items-center gap-2">
                 <button
-                  @click="router.push('/profile/edit')"
+                  @click="router.push('/settings/account')"
                   class="text-[color:var(--text-secondary)] hover:text-emerald-500 transition-colors"
                 >
                   修改
@@ -2217,7 +2357,10 @@ watch(
               {{ pullRefreshHint }}
             </div>
           </div>
-          <div class="border-b border-[color:var(--border-color)] px-6 py-6 transition-all duration-300">
+          <div
+            v-if="currentSection !== 'followers' && currentSection !== 'following'"
+            class="border-b border-[color:var(--border-color)] px-6 py-6 transition-all duration-300"
+          >
             <div class="flex items-center justify-between gap-4">
               <div class="flex items-center gap-4 text-2xl font-bold text-[color:var(--text-primary)]">
                 <component :is="currentSectionInfo.icon" class="w-7 h-7 text-emerald-500" />
@@ -2242,7 +2385,7 @@ watch(
             <article v-for="post in homeTimeline" :key="post.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex gap-3">
                 <button
-                  @click="goToUserProfile(post.authorId)"
+                  @click.stop="goToUserProfile(post.authorId)"
                   class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
                   title="查看用户主页"
                 >
@@ -2250,66 +2393,68 @@ watch(
                   <template v-else>{{ avatarText(post.author) }}</template>
                 </button>
                 <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <div class="cursor-pointer" @click="openPostDetail(post.id, false)">
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <button
-                      @click="goToUserProfile(post.authorId)"
+                      @click.stop="goToUserProfile(post.authorId)"
                       class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
                     >
                       {{ post.author }}
                     </button>
                     <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
                     <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
-                  </div>
-                  <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
-                  <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
+                    </div>
+                    <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
+                    <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
 
-                  <!-- Poll Display -->
-                  <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
-                    <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
-                      <!-- Voted or Expired: Show results -->
-                      <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
-                        <div 
-                          class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
-                          :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
-                        ></div>
-                        <div class="relative flex items-center justify-between px-4 py-2 text-[13px]">
-                          <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
-                          <span class="font-bold text-emerald-400">
-                            {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
-                          </span>
+                    <!-- Poll Display -->
+                    <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
+                      <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
+                        <!-- Voted or Expired: Show results -->
+                        <div v-if="post.poll.voters.includes(currentUser?.id || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
+                          <div 
+                            class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
+                            :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                          ></div>
+                          <div class="relative flex items-center justify-between px-4 py-2 text-[13px]">
+                            <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                            <span class="font-bold text-emerald-400">
+                              {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                            </span>
+                          </div>
                         </div>
+                        <!-- Not voted and Active: Show voting buttons -->
+                        <button 
+                          v-else 
+                          @click.stop="handleVote(post, [idx])"
+                          class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-left text-[13px] font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+                        >
+                          {{ opt.label }}
+                        </button>
                       </div>
-                      <!-- Not voted and Active: Show voting buttons -->
-                      <button 
-                        v-else 
-                        @click="handleVote(post, [idx])"
-                        class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-left text-[13px] font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
-                      >
-                        {{ opt.label }}
-                      </button>
-                    </div>
-                    
-                    <div class="mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
-                      <div class="flex items-center gap-2">
-                        <span>{{ post.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
-                        <span class="opacity-30">·</span>
-                        <span>{{ new Date(post.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+                      
+                      <div class="mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                        <div class="flex items-center gap-2">
+                          <span>{{ post.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
+                          <span class="opacity-30">·</span>
+                          <span>{{ new Date(post.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+                        </div>
+                        <button @click.stop="refreshPost(post.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新</button>
                       </div>
-                      <button @click="refreshPost(post.id)" class="text-emerald-500/70 hover:text-emerald-400 transition-colors">刷新</button>
+                    </div>
+
+                    <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+                      <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
+                    </div>
+
+                    <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
+                      <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
+                        #{{ tag }}
+                      </span>
                     </div>
                   </div>
 
-                  <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-                    <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
-                  </div>
-
-                  <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
-                    <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
-                      #{{ tag }}
-                    </span>
-                  </div>
-
-                  <div class="mt-5 flex flex-wrap items-center gap-3 text-sm">
+                  <div class="mt-5 flex flex-wrap items-center gap-3 text-sm" @click.stop>
                     <button
                       @click="openPostDetail(post.id)"
                       class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
@@ -2626,58 +2771,58 @@ watch(
 
                 <div v-else class="space-y-4">
                   <article
-                    v-for="reply in threadReplies"
-                    :key="reply.id"
+                    v-for="item in threadedReplies"
+                    :key="item.post.id"
                     class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-5"
-                    :style="{ marginLeft: replyOffset(reply) }"
+                    :style="{ marginLeft: replyOffset(item.depth) }"
                   >
                     <div class="flex items-center gap-2 text-sm">
                       <button
-                        @click="goToUserProfile(reply.authorId)"
+                        @click="goToUserProfile(item.post.authorId)"
                         class="font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
                       >
-                        {{ reply.author }}
+                        {{ item.post.author }}
                       </button>
-                      <span class="text-[color:var(--text-secondary)]">@{{ reply.instance }}</span>
+                      <span class="text-[color:var(--text-secondary)]">@{{ item.post.instance }}</span>
                       <span class="rounded-full bg-[var(--chip-bg)] px-3 py-1 text-[color:var(--text-muted)]">
-                        第 {{ (reply.replyDepth ?? 0) + 1 }} 层
+                        第 {{ item.depth }} 层
                       </span>
-                      <span class="text-[color:var(--text-muted)]">{{ reply.time }}</span>
+                      <span class="text-[color:var(--text-muted)]">{{ item.post.time }}</span>
                     </div>
                     <div class="mt-3 whitespace-pre-wrap text-base leading-7 text-[color:var(--text-secondary)]">
-                      {{ reply.content }}
+                      {{ item.post.content }}
                     </div>
-                    <div v-if="reply.tags.length" class="mt-4 flex flex-wrap gap-2">
-                      <span v-for="tag in reply.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
+                    <div v-if="item.post.tags.length" class="mt-4 flex flex-wrap gap-2">
+                      <span v-for="tag in item.post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
                         #{{ tag }}
                       </span>
                     </div>
                     <div class="mt-4 flex flex-wrap items-center gap-3 text-sm">
                       <button
-                        @click="setReplyTarget(reply)"
+                        @click="setReplyTarget(item.post)"
                         class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
                       >
                         <MessageCircle class="w-[18px] h-[18px] mr-1.5" />
                       </button>
                       <button
-                        @click="openPostDetail(reply.id)"
+                        @click="openPostDetail(item.post.id)"
                         class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
                       >
                         <List class="w-[18px] h-[18px] mr-1.5" />
                       </button>
                       <button
-                        @click="toggleLike(reply.id)"
+                        @click="toggleLike(item.post.id)"
                         class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                        :class="likedPosts[reply.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
+                        :class="likedPosts[item.post.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
                       >
-                        <Heart :class="{'fill-current': likedPosts[reply.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ reply.stats.likes + (likedPosts[reply.id] ? 1 : 0) || '' }}
+                        <Heart :class="{'fill-current': likedPosts[item.post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ item.post.stats.likes + (likedPosts[item.post.id] ? 1 : 0) || '' }}
                       </button>
                       <button
-                        @click="toggleBookmark(reply.id)"
+                        @click="toggleBookmark(item.post.id)"
                         class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
-                        :class="bookmarkedPosts[reply.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
+                        :class="bookmarkedPosts[item.post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                       >
-                        <Bookmark :class="{'fill-current': bookmarkedPosts[reply.id]}" class="w-[18px] h-[18px] mr-1.5" />
+                        <Bookmark :class="{'fill-current': bookmarkedPosts[item.post.id]}" class="w-[18px] h-[18px] mr-1.5" />
                       </button>
                     </div>
                   </article>
@@ -2714,6 +2859,67 @@ watch(
               @menu-action="handleMenuAction"
               @vote="handleVote"
             />
+          </section>
+
+          <section v-else-if="currentSection === 'followers' || currentSection === 'following'" class="divide-y divide-[color:var(--border-color)]">
+            <div class="px-6 py-5">
+              <div class="text-xl font-semibold text-[color:var(--text-primary)]">
+                {{ currentSection === 'followers' ? '我的关注者' : '我的关注中' }}
+              </div>
+              <div class="mt-1 text-sm text-[color:var(--text-muted)]">
+                {{ relationUsers.length }} 个账号
+              </div>
+            </div>
+
+            <div v-if="relationLoading" class="px-6 py-12 text-center text-sm text-[color:var(--text-muted)]">
+              正在加载列表...
+            </div>
+            <div v-else-if="relationError" class="px-6 py-12 text-center text-sm text-rose-300">
+              {{ relationError }}
+            </div>
+            <div v-else-if="relationUsers.length === 0" class="px-6 py-12 text-center text-sm text-[color:var(--text-muted)]">
+              暂无可展示账号
+            </div>
+
+            <article v-for="person in relationUsers" :key="person.id" class="px-6 py-5 transition hover:bg-[var(--panel-soft)]">
+              <div class="flex items-start justify-between gap-4">
+                <div class="min-w-0 flex items-start gap-3">
+                  <button
+                    @click="goToUserProfile(person.id)"
+                    class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                  >
+                    <img v-if="person.avatarUrl" :src="person.avatarUrl" :alt="person.displayName" class="h-full w-full object-cover" />
+                    <template v-else>{{ avatarText(person.displayName) }}</template>
+                  </button>
+                  <div class="min-w-0">
+                    <button
+                      @click="goToUserProfile(person.id)"
+                      class="text-left text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                    >
+                      {{ person.displayName }}
+                    </button>
+                    <div class="text-sm text-[color:var(--text-muted)]">{{ formatHandleInstance(person.handle, person.instance) }}</div>
+                    <div class="mt-2 text-sm text-[color:var(--text-secondary)] line-clamp-2">
+                      {{ person.bio || '这个用户还没有填写简介。' }}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  @click="toggleFollowRelationUser(person.id)"
+                  :disabled="followActionLoading[person.id]"
+                  class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {{
+                    followActionLoading[person.id]
+                      ? '处理中...'
+                      : followedUsers[person.id]
+                        ? '取消关注'
+                        : '关注'
+                  }}
+                </button>
+              </div>
+            </article>
           </section>
 
           <section v-else-if="currentSection === 'explore'">
@@ -3011,10 +3217,25 @@ watch(
                           <div class="max-w-[75%] rounded-[22px] rounded-bl-md border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-sm leading-6 text-[color:var(--text-primary)] shadow-sm">
                             <template v-if="message.forwardedPost">
                               <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-400">转发帖子</div>
-                              <div class="rounded-xl border border-emerald-500/30 bg-emerald-500/8 p-3">
-                                <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
-                                <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-[color:var(--text-primary)]">{{ message.forwardedPost.content }}</div>
-                              </div>
+                              <button
+                                @click="openForwardedPostDetail(message)"
+                                class="block w-full overflow-hidden rounded-xl border border-emerald-500/30 bg-emerald-500/8 text-left transition hover:border-emerald-400/60 hover:bg-emerald-500/12"
+                              >
+                                <div class="px-3 pt-3">
+                                  <div class="text-xs text-emerald-300">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
+                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-[color:var(--text-primary)]">{{ message.forwardedPost.content }}</div>
+                                </div>
+                                <div
+                                  v-if="message.forwardedPost.media?.preview"
+                                  class="mt-2 overflow-hidden border-t border-emerald-500/20 bg-[var(--panel-contrast)]"
+                                >
+                                  <img
+                                    :src="message.forwardedPost.media.preview"
+                                    :alt="message.forwardedPost.media.name || '转发帖子图片'"
+                                    class="h-36 w-full object-cover"
+                                  />
+                                </div>
+                              </button>
                             </template>
                             <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-[color:var(--text-muted)]">{{ message.time }}</div>
@@ -3025,10 +3246,25 @@ watch(
                           <div class="max-w-[75%] rounded-[22px] rounded-br-md bg-emerald-600 px-4 py-3 text-sm leading-6 text-white shadow-[0_10px_30px_rgba(16,185,129,0.22)]">
                             <template v-if="message.forwardedPost">
                               <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-100/90">转发帖子</div>
-                              <div class="rounded-xl border border-emerald-200/40 bg-emerald-500/15 p-3">
-                                <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
-                                <div class="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-white">{{ message.forwardedPost.content }}</div>
-                              </div>
+                              <button
+                                @click="openForwardedPostDetail(message)"
+                                class="block w-full overflow-hidden rounded-xl border border-emerald-200/40 bg-emerald-500/15 text-left transition hover:border-emerald-100/80 hover:bg-emerald-500/25"
+                              >
+                                <div class="px-3 pt-3">
+                                  <div class="text-xs text-emerald-100/90">{{ message.forwardedPost.author }} · {{ formatHandleInstance(message.forwardedPost.handle, message.forwardedPost.instance) }}</div>
+                                  <div class="mt-1 line-clamp-2 break-words text-[13px] leading-5 text-white">{{ message.forwardedPost.content }}</div>
+                                </div>
+                                <div
+                                  v-if="message.forwardedPost.media?.preview"
+                                  class="mt-2 overflow-hidden border-t border-emerald-100/30 bg-white/10"
+                                >
+                                  <img
+                                    :src="message.forwardedPost.media.preview"
+                                    :alt="message.forwardedPost.media.name || '转发帖子图片'"
+                                    class="h-36 w-full object-cover"
+                                  />
+                                </div>
+                              </button>
                             </template>
                             <div v-else>{{ message.text }}</div>
                             <div class="mt-2 text-[11px] text-emerald-100/80">{{ message.time }}</div>

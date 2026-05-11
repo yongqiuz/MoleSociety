@@ -3,7 +3,6 @@ import MainApp from '../pages/MainApp.vue';
 import LoginPage from '../pages/LoginPage.vue';
 import LogoutPage from '../pages/LogoutPage.vue';
 import SettingsPage from '../pages/SettingsPage.vue';
-import ProfileEditPage from '../pages/ProfileEditPage.vue';
 import UserProfilePage from '../pages/UserProfilePage.vue';
 import NotFoundPage from '../pages/NotFoundPage.vue';
 import AppearanceSettings from '../components/settings/AppearanceSettings.vue';
@@ -34,12 +33,6 @@ const router = createRouter({
       path: '/app',
       name: 'app',
       component: MainApp,
-      meta: { requiresAuth: true },
-    },
-    {
-      path: '/profile/edit',
-      name: 'profile-edit',
-      component: ProfileEditPage,
       meta: { requiresAuth: true },
     },
     {

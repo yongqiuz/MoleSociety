@@ -79,58 +79,60 @@ function avatarText(name: string) {
         <template v-else>{{ avatarText(post.author) }}</template>
       </button>
       <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          <button
-            @click="emit('open-profile', post.authorId)"
-            class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
-          >
-            {{ post.author }}
-          </button>
-          <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
-          <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
-        </div>
-        <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
-        <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
-
-        <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
-          <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
-            <div v-if="post.poll.voters.includes(currentUserId || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
-              <div
-                class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
-                :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
-              />
-              <div class="relative flex items-center justify-between px-4 py-2 text-[13px]">
-                <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
-                <span class="font-bold text-emerald-400">
-                  {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
-                </span>
-              </div>
-            </div>
+        <div class="cursor-pointer" @click="emit('open-detail', post.id)">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <button
-              v-else
-              @click="emit('vote', post, [idx])"
-              class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-left text-[13px] font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+              @click.stop="emit('open-profile', post.authorId)"
+              class="text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
             >
-              {{ opt.label }}
+              {{ post.author }}
             </button>
+            <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
+            <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
           </div>
-          <div class="mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
-            <span>{{ post.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
-            <span>{{ new Date(post.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+          <div v-if="post.bio" class="mt-0.5 text-xs text-[color:var(--text-muted)]">{{ post.bio }}</div>
+          <div class="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[color:var(--text-soft)]">{{ post.content }}</div>
+
+          <div v-if="post.poll" class="mt-3 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-3">
+            <div v-for="(opt, idx) in post.poll.options" :key="idx" class="relative">
+              <div v-if="post.poll.voters.includes(currentUserId || '') || new Date(post.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
+                <div
+                  class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
+                  :style="{ width: `${(opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
+                />
+                <div class="relative flex items-center justify-between px-4 py-2 text-[13px]">
+                  <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
+                  <span class="font-bold text-emerald-400">
+                    {{ Math.round((opt.votes / Math.max(1, post.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
+                  </span>
+                </div>
+              </div>
+              <button
+                v-else
+                @click.stop="emit('vote', post, [idx])"
+                class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-left text-[13px] font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+            <div class="mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+              <span>{{ post.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
+              <span>{{ new Date(post.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
+            </div>
+          </div>
+
+          <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+            <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
+          </div>
+
+          <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
+            <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
+              #{{ tag }}
+            </span>
           </div>
         </div>
 
-        <div v-if="post.media" class="mt-4 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
-          <img :src="post.media.preview" :alt="post.media.name" class="max-h-[60vh] w-full object-contain bg-[var(--panel-contrast)]" />
-        </div>
-
-        <div v-if="post.tags.length" class="mt-4 flex flex-wrap gap-2">
-          <span v-for="tag in post.tags" :key="tag" class="rounded-full bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200">
-            #{{ tag }}
-          </span>
-        </div>
-
-        <div class="mt-5 flex flex-wrap items-center gap-3 text-sm">
+        <div class="mt-5 flex flex-wrap items-center gap-3 text-sm" @click.stop>
           <button
             @click="emit('open-detail', post.id)"
             class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"

@@ -189,6 +189,7 @@ type CreateConversationRequest = {
 };
 
 export type UpdateUserRequest = {
+  username?: string;
   displayName?: string;
   bio?: string;
   instance?: string;

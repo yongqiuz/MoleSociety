@@ -133,12 +133,19 @@ function goBack() {
 }
 
 function goEditProfile() {
-  void router.push('/profile/edit');
+  void router.push('/settings/account');
 }
 
 function goStartConversation() {
   if (!user.value?.id || isSelfProfile.value) return;
   void router.push({ path: '/app', query: { messageUser: user.value.id } });
+}
+
+function goToUserProfile(target: SocialUser) {
+  const handle = String(target?.handle || '').replace(/^@/, '').trim();
+  const key = handle || target?.id;
+  if (!key) return;
+  void router.push(`/profile/${encodeURIComponent(key)}`);
 }
 
 function followStorageKey() {
@@ -552,13 +559,26 @@ watch(
           <article v-for="item in relationUsers" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
             <div class="flex items-start justify-between gap-4">
               <div class="min-w-0 flex items-start gap-3">
-                <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
+                <button
+                  @click="goToUserProfile(item)"
+                  class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900"
+                >
                   <img v-if="item.avatarUrl" :src="item.avatarUrl" :alt="item.displayName" class="h-full w-full object-cover" />
                   <template v-else>{{ avatarText(item.displayName) }}</template>
-                </div>
+                </button>
                 <div class="min-w-0">
-                  <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ item.displayName }}</div>
-                  <div class="text-sm text-[color:var(--text-muted)]">{{ formatHandleInstance(item.handle, item.instance) }}</div>
+                  <button
+                    @click="goToUserProfile(item)"
+                    class="text-left text-lg font-semibold text-[color:var(--text-primary)] transition hover:text-emerald-500"
+                  >
+                    {{ item.displayName }}
+                  </button>
+                  <button
+                    @click="goToUserProfile(item)"
+                    class="block text-left text-sm text-[color:var(--text-muted)] transition hover:text-emerald-400"
+                  >
+                    {{ formatHandleInstance(item.handle, item.instance) }}
+                  </button>
                   <div class="mt-3 grid grid-cols-3 gap-5 text-sm">
                     <div>
                       <div class="text-[color:var(--text-muted)]">关注者</div>

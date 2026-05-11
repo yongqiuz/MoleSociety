@@ -171,7 +171,7 @@ class AuthController {
     try {
       AuthResult result = auth.verifyWalletLogin(req.address, req.nonce, req.signature);
       setSessionCookie(response, result.session.id);
-      return ApiResponse.ok(AuthSessionResponse.from(result.user));
+      return ApiResponse.ok(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -182,7 +182,7 @@ class AuthController {
     try {
       AuthResult result = auth.passwordLogin(req.identifier, req.password);
       setSessionCookie(response, result.session.id);
-      return ApiResponse.ok(AuthSessionResponse.from(result.user));
+      return ApiResponse.ok(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -193,7 +193,7 @@ class AuthController {
     try {
       AuthResult result = auth.register(req, requestOrigin(request));
       setSessionCookie(response, result.session.id);
-      return ApiResponse.created(AuthSessionResponse.from(result.user));
+      return ApiResponse.created(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -213,7 +213,7 @@ class AuthController {
   ResponseEntity<ApiResponse<AuthSessionResponse>> me(HttpServletRequest request, HttpServletResponse response) {
     try {
       SocialUser user = auth.userFromRequest(request).orElseThrow(() -> ApiException.unauthorized("AUTH_SESSION_REQUIRED", "session", "authentication required"));
-      return ApiResponse.ok(AuthSessionResponse.from(user));
+      return ApiResponse.ok(AuthSessionResponse.from(user, auth.usernameByUserId(user.id), auth.requiresCurrentPassword(user.id)));
     } catch (ApiException err) {
       if ("AUTH_SESSION_INVALID".equals(err.code)) {
         clearSessionCookie(response);
@@ -325,6 +325,7 @@ class SocialController {
       if (!current.id.equals(id)) {
         throw ApiException.forbidden("AUTH_FORBIDDEN", "authorization", "you can only update your own profile");
       }
+      auth.updateUsername(current.id, req.username);
       return ApiResponse.ok(social.updateUser(id, req));
     } catch (ApiException err) {
       return err.toResponse();
@@ -1508,8 +1509,8 @@ class AuthService {
   }
 
   synchronized void changePassword(HttpServletRequest request, String currentPassword, String newPassword) {
-    if (!Strings.hasText(currentPassword) || !Strings.hasText(newPassword)) {
-      throw ApiException.badRequest("AUTH_MISSING_PASSWORD_FIELDS", "validation", "currentPassword and newPassword are required");
+    if (!Strings.hasText(newPassword)) {
+      throw ApiException.badRequest("AUTH_MISSING_PASSWORD_FIELDS", "validation", "newPassword is required");
     }
     if (newPassword.length() < 6) {
       throw ApiException.badRequest("AUTH_WEAK_PASSWORD", "validation", "password must be at least 6 characters");
@@ -1521,7 +1522,13 @@ class AuthService {
         .findFirst()
         .orElseThrow(() -> ApiException.notFound("AUTH_ACCOUNT_NOT_FOUND", "credentials", "account not found"));
 
-    if (!encoder.matches(currentPassword, account.passwordHash)) {
+    boolean needsCurrent = requiresCurrentPassword(user.id);
+    String trimmedCurrent = Strings.value(currentPassword).trim();
+    if (needsCurrent) {
+      if (!Strings.hasText(trimmedCurrent) || !encoder.matches(trimmedCurrent, account.passwordHash)) {
+        throw ApiException.unauthorized("AUTH_INVALID_PASSWORD", "credentials", "invalid password");
+      }
+    } else if (Strings.hasText(trimmedCurrent) && !encoder.matches(trimmedCurrent, account.passwordHash)) {
       throw ApiException.unauthorized("AUTH_INVALID_PASSWORD", "credentials", "invalid password");
     }
     if (encoder.matches(newPassword, account.passwordHash)) {
@@ -1529,6 +1536,7 @@ class AuthService {
     }
 
     account.passwordHash = encoder.encode(newPassword);
+    account.status = "active";
     account.updatedAt = Instant.now().toString();
     persistence.saveAuthAccount(account);
   }
@@ -1574,7 +1582,7 @@ class AuthService {
     account.passwordHash = encoder.encode(password);
     account.wallet = wallet;
     account.userId = user.id;
-    account.status = "active";
+    account.status = (!req.autoWallet && Strings.hasText(req.walletAddress)) ? "active_password_pending" : "active";
     account.createdAt = Instant.now().toString();
     account.updatedAt = account.createdAt;
     accounts.put(account.id, account);
@@ -1595,6 +1603,50 @@ class AuthService {
     }
     activeSessions.touch(session);
     return Optional.of(social.getUser(session.userId));
+  }
+
+  String usernameByUserId(String userId) {
+    if (!Strings.hasText(userId)) return "";
+    return accounts.values().stream()
+        .filter(a -> userId.equals(a.userId))
+        .map(a -> Strings.value(a.username))
+        .findFirst()
+        .orElse("");
+  }
+
+  boolean requiresCurrentPassword(String userId) {
+    if (!Strings.hasText(userId)) return true;
+    Account account = accounts.values().stream()
+        .filter(a -> userId.equals(a.userId))
+        .findFirst()
+        .orElse(null);
+    if (account == null) return true;
+    return !"active_password_pending".equals(Strings.value(account.status));
+  }
+
+  synchronized void updateUsername(String userId, String nextUsernameRaw) {
+    if (nextUsernameRaw == null) return;
+    String nextUsername = nextUsernameRaw.trim();
+    if (!Strings.hasText(nextUsername)) {
+      throw ApiException.badRequest("AUTH_USERNAME_REQUIRED", "validation", "username is required");
+    }
+    Account account = accounts.values().stream()
+        .filter(a -> userId.equals(a.userId))
+        .findFirst()
+        .orElseThrow(() -> ApiException.notFound("AUTH_ACCOUNT_NOT_FOUND", "credentials", "account not found"));
+    String current = Strings.value(account.username);
+    if (nextUsername.equalsIgnoreCase(current)) {
+      return;
+    }
+    for (Account existing : accounts.values()) {
+      if (existing == account) continue;
+      if (nextUsername.equalsIgnoreCase(existing.username)) {
+        throw ApiException.conflict("AUTH_USERNAME_TAKEN", "conflict", "username already taken");
+      }
+    }
+    account.username = nextUsername;
+    account.updatedAt = Instant.now().toString();
+    persistence.saveAuthAccount(account);
   }
 
   void deleteSession(String sessionID) {
@@ -2187,12 +2239,15 @@ class SocialService {
     for (FederationInstance item : instances) {
       int online = onlineByInstance.getOrDefault(item.name, 0);
       long postCount = posts.stream().filter(post -> item.name.equals(post.instance)).count();
+      String members = Strings.hasText(item.members) ? item.members : online + " 人在线";
+      String latency = Strings.hasText(item.latency) ? item.latency : measuredInstanceLatency(item.name);
+      String status = Strings.hasText(item.status) ? item.status : (online > 0 || postCount > 0 ? "healthy" : "idle");
       FederationInstance live = new FederationInstance(
           item.name,
           item.focus,
-          online + " 人在线",
-          measuredInstanceLatency(item.name),
-          online > 0 || postCount > 0 ? "healthy" : "idle"
+          members,
+          latency,
+          status
       );
       result.add(live);
     }
@@ -2902,6 +2957,8 @@ class AuthResult {
 
 class AuthSessionResponse {
   public String id;
+  public String username;
+  public boolean requireCurrentPassword;
   public String handle;
   public String displayName;
   public String instance;
@@ -2913,9 +2970,11 @@ class AuthSessionResponse {
   public List<String> featuredTags = new ArrayList<>();
   public boolean isBot;
 
-  static AuthSessionResponse from(SocialUser user) {
+  static AuthSessionResponse from(SocialUser user, String username, boolean requireCurrentPassword) {
     AuthSessionResponse res = new AuthSessionResponse();
     res.id = user.id;
+    res.username = Strings.value(username);
+    res.requireCurrentPassword = requireCurrentPassword;
     res.handle = user.handle;
     res.displayName = user.displayName;
     res.instance = user.instance;
@@ -2991,6 +3050,7 @@ class CreateUserRequest {
 }
 
 class UpdateUserRequest {
+  public String username;
   public String displayName;
   public String bio;
   public String instance;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { ApiError, changePassword } from '../../api/authApi';
+import { useAuth } from '../../composables/useAuth';
 
 type PrivacySettings = {
   profileDiscoverable: boolean;
@@ -33,6 +34,9 @@ const passwordForm = ref({
   newPassword: '',
   confirmPassword: '',
 });
+const { currentUser } = useAuth();
+const readonlyUsername = computed(() => String(currentUser.value?.username || currentUser.value?.handle || '').replace(/^@/, ''));
+const requireCurrentPassword = computed(() => currentUser.value?.requireCurrentPassword !== false);
 
 function loadSettings() {
   if (typeof window === 'undefined') return;
@@ -72,8 +76,12 @@ async function submitChangePassword() {
   const newPassword = passwordForm.value.newPassword.trim();
   const confirmPassword = passwordForm.value.confirmPassword.trim();
 
-  if (!currentPassword || !newPassword || !confirmPassword) {
+  if (!newPassword || !confirmPassword) {
     passwordError.value = '请填写完整密码信息';
+    return;
+  }
+  if (requireCurrentPassword.value && !currentPassword) {
+    passwordError.value = '请填写当前密码';
     return;
   }
   if (newPassword.length < 6) {
@@ -84,7 +92,7 @@ async function submitChangePassword() {
     passwordError.value = '两次输入的新密码不一致';
     return;
   }
-  if (currentPassword === newPassword) {
+  if (currentPassword && currentPassword === newPassword) {
     passwordError.value = '新密码不能与旧密码相同';
     return;
   }
@@ -226,9 +234,21 @@ async function submitChangePassword() {
 
       <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-5 py-5">
         <div class="text-base font-semibold text-[color:var(--text-primary)]">修改密码</div>
-        <div class="mt-1 text-sm text-[color:var(--text-muted)]">输入当前密码并设置新密码，至少 6 位。</div>
+        <div class="mt-1 text-sm text-[color:var(--text-muted)]">
+          {{ requireCurrentPassword ? '输入当前密码并设置新密码，至少 6 位。' : '首次设置密码，无需填写当前密码。' }}
+        </div>
+        <div class="mt-4">
+          <div class="mb-2 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">账号</div>
+          <input
+            :value="readonlyUsername"
+            type="text"
+            readonly
+            class="w-full cursor-not-allowed rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-bg)] px-4 py-3 text-sm text-[color:var(--text-secondary)] opacity-80"
+          />
+        </div>
         <form class="mt-4 grid gap-3 sm:grid-cols-2" @submit.prevent="submitChangePassword">
           <input
+            v-if="requireCurrentPassword"
             v-model="passwordForm.currentPassword"
             type="password"
             autocomplete="current-password"
