@@ -148,6 +148,15 @@ export type BootstrapPayload = {
   instances: FederationInstance[];
 };
 
+export type PagedResult<T> = {
+  items: T[];
+  limit: number;
+  offset: number;
+  nextOffset: number;
+  hasMore: boolean;
+  total: number;
+};
+
 type CreateMediaRequest = {
   ownerId: string;
   name: string;
@@ -229,6 +238,22 @@ export async function fetchSocialBootstrap(limit = 20) {
 
 export async function fetchSocialBootstrapMine(limit = 20) {
   return request<BootstrapPayload>(`/social/bootstrap?limit=${limit}&mine=1`);
+}
+
+export async function fetchSocialNews(limit = 20, offset = 0) {
+  return request<PagedResult<SocialPost>>(`/social/news?limit=${limit}&offset=${offset}`);
+}
+
+export async function fetchSocialHot(limit = 20, offset = 0) {
+  return request<PagedResult<SocialPost>>(`/social/hot?limit=${limit}&offset=${offset}`);
+}
+
+export async function fetchSocialLatest(limit = 20, offset = 0) {
+  return request<PagedResult<SocialPost>>(`/social/latest?limit=${limit}&offset=${offset}`);
+}
+
+export async function fetchSocialInstances() {
+  return request<FederationInstance[]>('/social/instances');
 }
 
 export async function fetchUser(userId: string) {

@@ -12,6 +12,9 @@ import {
   fetchPostReplies,
   fetchPostThread,
   fetchSocialBootstrap,
+  fetchSocialLatest,
+  fetchSocialNews,
+  fetchSocialInstances,
   fetchSocialBootstrapMine,
   fetchUserFollowers,
   fetchUserFollowing,
@@ -35,7 +38,7 @@ import { useAuth } from '../composables/useAuth';
 import type { Component } from 'vue';
 import {
   Home, Compass, Bell, Hash, Star, Bookmark, AtSign, Settings,
-  MoreHorizontal, User, Shield, PenTool, Mail, AlignJustify, Users,
+  MoreHorizontal, Shield, PenTool, Mail, AlignJustify, Users,
   Filter, Trash2, Image as ImageIcon, CheckSquare, Smile, Search,
   ArrowLeft, ChevronLeft, LogOut, MessageCircle, Repeat, Heart, Pencil, TrendingUp, Newspaper,
   Globe, Moon, Lock, ChevronDown, ChevronUp, X, BarChart3, RefreshCw
@@ -45,7 +48,6 @@ import PostFeedCard from '../components/posts/PostFeedCard.vue';
 
 type Section =
   | 'home'
-  | 'myFeed'
   | 'postDetail'
   | 'explore'
   | 'messages'
@@ -59,7 +61,7 @@ type Section =
   | 'following'
   | 'preferences';
 
-type ExploreTab = 'posts' | 'topics' | 'users' | 'news';
+type ExploreTab = 'posts' | 'latest' | 'topics' | 'users' | 'news';
 
 type SettingsTab =
   | 'profile'
@@ -132,6 +134,12 @@ type MessageCard = {
   id: string;
   from: 'me' | 'peer';
   text: string;
+  imageEmoji?: {
+    name: string;
+    preview: string;
+    type: string;
+    sizeLabel: string;
+  } | null;
   time: string;
   createdAt?: string;
   forwardedPost?: {
@@ -178,7 +186,6 @@ const primaryNavItems: { label: string; key: Section; icon: Component }[] = [
   { label: '主页', key: 'home', icon: Home },
   { label: '当前热门', key: 'explore', icon: TrendingUp },
   { label: '消息', key: 'messages', icon: Mail },
-  { label: '我的内容', key: 'myFeed', icon: User },
   { label: '通知', key: 'notifications', icon: Bell },
 ];
 
@@ -216,6 +223,17 @@ const pollOptions = ref(['', '']);
 const pollExpiresIn = ref(1440); // 1 day
 const pollMultiple = ref(false);
 const messageDraft = ref('');
+const messageMediaPreview = ref<string | null>(null);
+const messageMediaMeta = ref<{ name: string; sizeLabel: string; type: string; sizeBytes: number } | null>(null);
+const showMessageEmojiPicker = ref(false);
+const showMessageStickerPanel = ref(false);
+const messageEmojiPanelRef = ref<HTMLElement | null>(null);
+const messageEmojiTriggerRef = ref<HTMLElement | null>(null);
+const messageStickerPanelRef = ref<HTMLElement | null>(null);
+const messageStickerTriggerRef = ref<HTMLElement | null>(null);
+const messageImageInputRef = ref<HTMLInputElement | null>(null);
+const messageInputRef = ref<HTMLTextAreaElement | null>(null);
+const recentMessageStickers = ref<Array<{ name: string; preview: string; type: string; sizeLabel: string }>>([]);
 const searchQuery = ref('');
 const selectedConversationId = ref('');
 const selectedTopicTag = ref('');
@@ -378,10 +396,14 @@ const PULL_REFRESH_THRESHOLD = 72;
 const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
 const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
 const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
+const MESSAGE_IMAGE_EMOJI_PREFIX = '[IMAGE_EMOJI]';
 const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
 const MENTION_READ_STORAGE_PREFIX = 'mole-mention-read';
 const FOLLOWER_SEEN_IDS_STORAGE_PREFIX = 'mole-follower-seen-ids';
 const MESSAGE_READ_AT_STORAGE_PREFIX = 'mole-message-read-at';
+const MESSAGE_STICKER_STORAGE_PREFIX = 'mole-message-stickers';
+const INSTANCE_POLL_INTERVAL_MS = 2000;
+const DEFAULT_FEED_LIMIT = 200;
 
 const isLoggedIn = computed(() => !!authSession.value);
 const isReplyingRoot = computed(() => !!threadFocusPost.value && activeReplyTarget.value?.id === threadFocusPost.value.id);
@@ -393,18 +415,9 @@ const newsTimeline = ref<FeedCard[]>([]);
 const newsLoading = ref(false);
 const explorePostsTimeline = ref<FeedCard[]>([]);
 const explorePostsLoading = ref(false);
-
-function isNewsPost(p: FeedCard) {
-  const normalizedType = String(p.type || '').trim().toLowerCase();
-  if (normalizedType === 'news') return true;
-  const tags = Array.isArray(p.tags) ? p.tags : [];
-  if (tags.some((tag) => String(tag).includes('新闻') || String(tag).includes('热点'))) return true;
-  const handle = String(p.handle || '').trim().toLowerCase();
-  if (handle === '@news_bot' || handle === 'news_bot') return true;
-  return false;
-}
-
-const newsPosts = computed(() => newsTimeline.value.filter((p) => isNewsPost(p)));
+const latestPostsLoading = ref(false);
+const instancePollingTimer = ref<number | null>(null);
+const instancePollingInFlight = ref(false);
 
 function parseNewsContent(content: string) {
   const text = String(content || '').trim();
@@ -428,13 +441,72 @@ async function loadNewsTimeline(force = false) {
   newsLoading.value = true;
   try {
     if (!apiOnline.value) return;
-    const payload = await fetchSocialBootstrap(200);
-    newsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => isNewsPost(post));
+    const payload = await fetchSocialNews(DEFAULT_FEED_LIMIT, 0);
+    newsTimeline.value = hydrateFeedCardList((payload.items || []).map(toFeedCard));
   } catch {
     // keep current timeline, avoid interrupting main flow
   } finally {
     newsLoading.value = false;
   }
+}
+
+function stopInstancePolling() {
+  if (instancePollingTimer.value !== null && typeof window !== 'undefined') {
+    window.clearTimeout(instancePollingTimer.value);
+  }
+  instancePollingTimer.value = null;
+}
+
+function scheduleNextInstancePoll() {
+  if (typeof window === 'undefined') return;
+  stopInstancePolling();
+  instancePollingTimer.value = window.setTimeout(() => {
+    void pollInstancesSafely();
+  }, INSTANCE_POLL_INTERVAL_MS);
+}
+
+async function pollInstancesSafely() {
+  if (instancePollingInFlight.value) {
+    scheduleNextInstancePoll();
+    return;
+  }
+  if (!apiOnline.value) {
+    scheduleNextInstancePoll();
+    return;
+  }
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    scheduleNextInstancePoll();
+    return;
+  }
+  instancePollingInFlight.value = true;
+  try {
+    const latest = await fetchSocialInstances();
+    if (Array.isArray(latest)) {
+      instances.value = latest;
+    }
+  } catch {
+    // swallow polling errors; next round will retry
+  } finally {
+    instancePollingInFlight.value = false;
+    scheduleNextInstancePoll();
+  }
+}
+
+function startInstancePolling() {
+  if (typeof window === 'undefined') return;
+  if (instancePollingTimer.value !== null) return;
+  scheduleNextInstancePoll();
+}
+
+function handleVisibilityChange() {
+  if (typeof document === 'undefined') return;
+  if (document.visibilityState === 'visible') {
+    if (!instancePollingInFlight.value) {
+      void pollInstancesSafely();
+    }
+    return;
+  }
+  stopInstancePolling();
 }
 const activeMoreMenuId = ref<string | null>(null);
 
@@ -647,12 +719,26 @@ async function loadExplorePostsTimeline(force = false) {
   explorePostsLoading.value = true;
   try {
     if (!apiOnline.value) return;
-    const payload = await fetchSocialBootstrap(200);
-    explorePostsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => !isNewsPost(post));
+    // "当前热门" follows product rule: show all non-news user posts in order.
+    const payload = await fetchSocialLatest(DEFAULT_FEED_LIMIT, 0);
+    explorePostsTimeline.value = hydrateFeedCardList((payload.items || []).map(toFeedCard));
   } catch {
     // keep current timeline, avoid interrupting main flow
   } finally {
     explorePostsLoading.value = false;
+  }
+}
+
+async function loadLatestPostsTimeline(force = false) {
+  if (latestPostsLoading.value) return;
+  if (!force && posts.value.length > 0) return;
+  latestPostsLoading.value = true;
+  try {
+    if (!apiOnline.value) return;
+    const payload = await fetchSocialLatest(DEFAULT_FEED_LIMIT, 0);
+    posts.value = hydrateFeedCardList((payload.items || []).map(toFeedCard));
+  } finally {
+    latestPostsLoading.value = false;
   }
 }
 
@@ -697,7 +783,10 @@ async function selectInstance(name: string) {
     apiOnline.value = true;
     // Silent refresh in background, do not block the interaction.
     void fetchSocialBootstrap()
-      .then((payload) => applyBootstrap(payload))
+      .then(async (payload) => {
+        applyBootstrap(payload);
+        await loadLatestPostsTimeline(true);
+      })
       .catch(() => {});
   } catch (error) {
     // rollback optimistic selection
@@ -753,10 +842,6 @@ const currentSectionInfo = computed(() => {
   
   if (currentSection.value === 'postDetail') {
     return { label: '摩文详情', icon: MessageCircle };
-  }
-
-  if (currentSection.value === 'myFeed') {
-    return { label: '我的内容', icon: User };
   }
   
   return { label: '主页', icon: Home };
@@ -900,78 +985,14 @@ const visibleInstances = computed(() => {
   return (Array.isArray(instances.value) ? instances.value : []).map((item) => ({
     ...item,
     members: String(item.members || '0 人在线'),
-    latency: String(clientLatencyByInstance.value[item.name] || item.latency || '未探测'),
+    latency: String(item.latency || '未探测'),
   }));
 });
 
-const clientLatencyByInstance = ref<Record<string, string>>({});
-const measuringInstanceLatency = ref(false);
-
-function instanceProbeURL(name: string) {
-  if (name === '摩尔1号') return 'https://molesociety.longyinstudio.cn/healthz';
-  if (name === '摩尔2号') return 'https://dev.longyinstudio.cn/healthz';
-  if (name === '摩尔3号') return 'https://dev.longyinstudio.cn/healthz';
-  return '';
-}
-
-async function measureOneLatency(url: string) {
-  if (!url) return '未探测';
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 3000);
-  const started = performance.now();
-  try {
-    await fetch(url, {
-      method: 'GET',
-      cache: 'no-store',
-      mode: 'cors',
-      signal: ctrl.signal,
-    });
-    const elapsed = Math.max(1, Math.round(performance.now() - started));
-    return `${elapsed} ms`;
-  } catch {
-    return '不可达';
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function membersCountOf(value: string) {
-  const match = String(value || '').match(/(\d+)/);
-  return match ? Number(match[1]) : 0;
-}
-
-function withMembersCount(instance: FederationInstance, count: number): FederationInstance {
-  return {
-    ...instance,
-    members: `${Math.max(0, count)} 人在线`,
-  };
-}
-
 function applyInstanceMemberSwitch(fromName: string, toName: string) {
-  if (!fromName || !toName || fromName === toName) return;
-  instances.value = instances.value.map((item) => {
-    if (item.name === fromName) {
-      return withMembersCount(item, membersCountOf(item.members) - 1);
-    }
-    if (item.name === toName) {
-      return withMembersCount(item, membersCountOf(item.members) + 1);
-    }
-    return item;
-  });
-}
-
-async function measureClientInstanceLatency() {
-  if (measuringInstanceLatency.value) return;
-  measuringInstanceLatency.value = true;
-  try {
-    const next: Record<string, string> = {};
-    for (const item of instances.value) {
-      next[item.name] = await measureOneLatency(instanceProbeURL(item.name));
-    }
-    clientLatencyByInstance.value = next;
-  } finally {
-    measuringInstanceLatency.value = false;
-  }
+  // no-op: instance members should come from backend snapshots only
+  void fromName;
+  void toName;
 }
 
 const topicTimeline = computed(() => {
@@ -1298,6 +1319,38 @@ function toForwardedPostBody(post: FeedCard) {
   return `${FORWARDED_POST_PREFIX}${JSON.stringify(payload)}`;
 }
 
+function toMessageImageBody(text: string, image: { name: string; preview: string; type: string; sizeLabel: string }) {
+  const payload = {
+    text,
+    media: image,
+  };
+  return `${MESSAGE_IMAGE_EMOJI_PREFIX}${JSON.stringify(payload)}`;
+}
+
+function parseMessageImageBody(text: string) {
+  if (!text.startsWith(MESSAGE_IMAGE_EMOJI_PREFIX)) return null;
+  const raw = text.slice(MESSAGE_IMAGE_EMOJI_PREFIX.length);
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const media = parsed.media && typeof parsed.media === 'object'
+      ? {
+          name: String(parsed.media.name || ''),
+          preview: String(parsed.media.preview || ''),
+          type: String(parsed.media.type || 'image'),
+          sizeLabel: String(parsed.media.sizeLabel || ''),
+        }
+      : null;
+    if (!media?.preview) return null;
+    return {
+      text: String(parsed.text || ''),
+      media,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseForwardedPostBody(text: string) {
   if (!text.startsWith(FORWARDED_POST_PREFIX)) return null;
   const raw = text.slice(FORWARDED_POST_PREFIX.length);
@@ -1574,10 +1627,14 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     messages: conversation.messages.map((message) => {
       const from: 'me' | 'peer' = message.senderId === userId ? 'me' : 'peer';
       const forwardedPost = parseForwardedPostBody(message.body);
+      const imageEmoji = forwardedPost ? null : parseMessageImageBody(message.body);
       return {
       id: message.id,
       from,
-      text: forwardedPost ? forwardedSummaryText(forwardedPost, from) : message.body,
+      text: forwardedPost
+        ? forwardedSummaryText(forwardedPost, from)
+        : (imageEmoji?.text || (imageEmoji ? '[图片表情]' : message.body)),
+      imageEmoji: imageEmoji?.media || null,
       forwardedPost,
       time: formatTimestamp(message.createdAt),
       createdAt: message.createdAt,
@@ -1727,10 +1784,8 @@ async function startConversation(targetUser: SocialUser) {
 
 function applyBootstrap(payload: BootstrapPayload) {
   currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? null;
+  loadRecentMessageStickers();
   people.value = payload.users;
-  posts.value = hydrateFeedCardList(payload.feed.map(toFeedCard));
-  explorePostsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => !isNewsPost(post));
-  newsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => isNewsPost(post));
   assets.value = payload.media.map(toAssetCard);
   const mappedConversations = payload.conversations
     .map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null))
@@ -1915,7 +1970,10 @@ async function loadBootstrap() {
   try {
     const payload = await fetchSocialBootstrap();
     applyBootstrap(payload);
-    await loadMyFeed();
+    await Promise.all([
+      loadMyFeed(),
+      loadLatestPostsTimeline(true),
+    ]);
     apiOnline.value = true;
     errorMessage.value = '';
   } catch (error) {
@@ -2031,6 +2089,7 @@ async function refreshHomeTimeline() {
     ]);
     applyBootstrap(payload);
     myPosts.value = minePayload ? minePayload.feed.map(toFeedCard) : [];
+    await loadLatestPostsTimeline(true);
     errorMessage.value = '';
     apiOnline.value = true;
   } catch (error) {
@@ -2367,6 +2426,55 @@ function recentTagsStorageKey() {
   return userId ? `${RECENT_TAGS_STORAGE_KEY_PREFIX}:${userId}` : '';
 }
 
+function messageStickerStorageKey() {
+  const userId = authSession.value?.id || currentUser.value?.id || '';
+  return userId ? `${MESSAGE_STICKER_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function loadRecentMessageStickers() {
+  const key = messageStickerStorageKey();
+  if (!key || typeof window === 'undefined') {
+    recentMessageStickers.value = [];
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      recentMessageStickers.value = [];
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      recentMessageStickers.value = [];
+      return;
+    }
+    recentMessageStickers.value = parsed
+      .filter((item) => item && typeof item === 'object' && String(item.preview || '').trim())
+      .map((item) => ({
+        name: String(item.name || '图片表情'),
+        preview: String(item.preview || ''),
+        type: String(item.type || 'image'),
+        sizeLabel: String(item.sizeLabel || ''),
+      }))
+      .slice(0, 30);
+  } catch {
+    recentMessageStickers.value = [];
+  }
+}
+
+function persistRecentMessageStickers() {
+  const key = messageStickerStorageKey();
+  if (!key || typeof window === 'undefined') return;
+  window.localStorage.setItem(key, JSON.stringify(recentMessageStickers.value.slice(0, 30)));
+}
+
+function addRecentMessageSticker(image: { name: string; preview: string; type: string; sizeLabel: string }) {
+  if (!image.preview) return;
+  const deduped = recentMessageStickers.value.filter((item) => item.preview !== image.preview);
+  recentMessageStickers.value = [image, ...deduped].slice(0, 30);
+  persistRecentMessageStickers();
+}
+
 function loadRecentPostTags() {
   if (typeof window === 'undefined') return;
   const key = recentTagsStorageKey();
@@ -2530,6 +2638,16 @@ function handleDocumentClick(event: MouseEvent) {
       showReplyEmojiPicker.value = false;
     }
   }
+  if (showMessageEmojiPicker.value) {
+    if (!messageEmojiPanelRef.value?.contains(target) && !messageEmojiTriggerRef.value?.contains(target)) {
+      showMessageEmojiPicker.value = false;
+    }
+  }
+  if (showMessageStickerPanel.value) {
+    if (!messageStickerPanelRef.value?.contains(target) && !messageStickerTriggerRef.value?.contains(target)) {
+      showMessageStickerPanel.value = false;
+    }
+  }
 }
 
 function addPollOption() {
@@ -2610,7 +2728,7 @@ async function publishPost() {
 }
 
 async function sendMessage() {
-  if (!messageDraft.value.trim() || !currentUser.value || !activeConversation.value || saving.value) return;
+  if ((!messageDraft.value.trim() && !messageMediaPreview.value) || !currentUser.value || !activeConversation.value || saving.value) return;
 
   saving.value = true;
   try {
@@ -2622,16 +2740,37 @@ async function sendMessage() {
       return;
     }
 
+    const body = messageMediaPreview.value && messageMediaMeta.value
+      ? toMessageImageBody(messageDraft.value.trim(), {
+          name: messageMediaMeta.value.name,
+          preview: messageMediaPreview.value,
+          type: messageMediaMeta.value.type || 'image',
+          sizeLabel: messageMediaMeta.value.sizeLabel || '',
+        })
+      : messageDraft.value.trim();
+
     const updatedConversation = await createConversationMessage(targetConversation.id, {
       senderId: currentUser.value.id,
-      body: messageDraft.value.trim(),
+      body,
     });
 
     const mapped = toConversationCard(updatedConversation, currentUser.value?.id ?? null);
     upsertConversation(mapped);
     selectedConversationId.value = mapped.id;
 
+    if (messageMediaPreview.value && messageMediaMeta.value) {
+      addRecentMessageSticker({
+        name: messageMediaMeta.value.name,
+        preview: messageMediaPreview.value,
+        type: messageMediaMeta.value.type || 'image',
+        sizeLabel: messageMediaMeta.value.sizeLabel || '',
+      });
+    }
     messageDraft.value = '';
+    messageMediaPreview.value = null;
+    messageMediaMeta.value = null;
+    showMessageEmojiPicker.value = false;
+    showMessageStickerPanel.value = false;
     errorMessage.value = '';
     await scrollMessagesToBottom();
   } catch (error) {
@@ -2657,6 +2796,84 @@ async function sendMessage() {
   } finally {
     saving.value = false;
   }
+}
+
+function triggerMessageImagePicker() {
+  messageImageInputRef.value?.click();
+}
+
+function clearMessageMedia() {
+  messageMediaPreview.value = null;
+  messageMediaMeta.value = null;
+  if (messageImageInputRef.value) messageImageInputRef.value.value = '';
+}
+
+function handleMessageMediaChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    errorMessage.value = '消息仅支持发送图片表情。';
+    input.value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = typeof reader.result === 'string' ? reader.result : null;
+    if (!result) return;
+    messageMediaPreview.value = result;
+    messageMediaMeta.value = {
+      name: file.name,
+      sizeLabel: formatBytes(file.size),
+      type: file.type || 'image',
+      sizeBytes: file.size,
+    };
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function toggleMessageEmojiPicker() {
+  showMessageEmojiPicker.value = !showMessageEmojiPicker.value;
+  if (showMessageEmojiPicker.value) showMessageStickerPanel.value = false;
+}
+
+function toggleMessageStickerPanel() {
+  showMessageStickerPanel.value = !showMessageStickerPanel.value;
+  if (showMessageStickerPanel.value) showMessageEmojiPicker.value = false;
+}
+
+function useStickerAsMessage(sticker: { name: string; preview: string; type: string; sizeLabel: string }) {
+  messageMediaPreview.value = sticker.preview;
+  messageMediaMeta.value = {
+    name: sticker.name || '图片表情',
+    sizeLabel: sticker.sizeLabel || '',
+    type: sticker.type || 'image',
+    sizeBytes: 0,
+  };
+  addRecentMessageSticker(sticker);
+  showMessageStickerPanel.value = false;
+}
+
+async function insertMessageEmojiAtCursor(emoji: string) {
+  if (!emoji) return;
+  const textarea = messageInputRef.value;
+  const start = textarea?.selectionStart ?? messageDraft.value.length;
+  const end = textarea?.selectionEnd ?? start;
+  messageDraft.value = `${messageDraft.value.slice(0, start)}${emoji}${messageDraft.value.slice(end)}`;
+  await nextTick();
+  const nextPos = start + emoji.length;
+  if (textarea) {
+    textarea.focus();
+    textarea.setSelectionRange(nextPos, nextPos);
+  }
+}
+
+function handleMessageEmojiPick(event: Event) {
+  const detail = (event as Event & { detail?: { unicode?: string; emoji?: { unicode?: string } | string } }).detail;
+  const unicode = detail?.unicode || (typeof detail?.emoji === 'string' ? detail.emoji : detail?.emoji?.unicode) || '';
+  if (!unicode) return;
+  void insertMessageEmojiAtCursor(unicode);
 }
 
 async function openForwardDialog(post: FeedCard) {
@@ -2710,17 +2927,17 @@ onMounted(() => {
   loadInteractionState();
   loadReadState();
   document.addEventListener('click', handleDocumentClick);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener('resize', updateEmojiPickerFloatingPosition);
   window.addEventListener('scroll', updateEmojiPickerFloatingPosition, true);
+  startInstancePolling();
 });
 
 watch(
-  [() => currentSection.value, () => instances.value.map((item) => item.name).join('|')],
-  async ([section]) => {
-    if (section !== 'lists') return;
-    await measureClientInstanceLatency();
+  () => currentUser.value?.id || '',
+  () => {
+    loadRecentMessageStickers();
   },
-  { immediate: true },
 );
 
 watch(
@@ -2731,6 +2948,10 @@ watch(
       void loadExplorePostsTimeline();
       return;
     }
+    if (tab === 'latest') {
+      void loadLatestPostsTimeline();
+      return;
+    }
     if (tab !== 'news') return;
     void loadNewsTimeline();
   },
@@ -2739,8 +2960,10 @@ watch(
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
   window.removeEventListener('resize', updateEmojiPickerFloatingPosition);
   window.removeEventListener('scroll', updateEmojiPickerFloatingPosition, true);
+  stopInstancePolling();
 });
 
 watch(
@@ -3686,33 +3909,6 @@ watch(
             </div>
           </section>
 
-          <section v-else-if="currentSection === 'myFeed'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-if="myTimeline.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
-              你发布的摩文会显示在这里。
-            </article>
-            <PostFeedCard
-              v-for="post in myTimeline"
-              v-else
-              :key="post.id"
-              :post="post"
-              :avatar-url="userAvatarUrl(post.authorId)"
-              :liked="likedPosts[post.id]"
-              :bookmarked="bookmarkedPosts[post.id]"
-              :current-user-id="currentUser?.id"
-              :mention-users="people"
-              :show-more-menu="true"
-              :more-menu-open="activeMoreMenuId === post.id"
-              @open-profile="goToUserProfile"
-              @open-detail="openPostDetail"
-              @forward="openForwardDialog"
-              @toggle-like="toggleLike"
-              @toggle-bookmark="toggleBookmark"
-              @toggle-more="toggleMoreMenu"
-              @menu-action="handleMenuAction"
-              @vote="handleVote"
-            />
-          </section>
-
           <section v-else-if="currentSection === 'followers' || currentSection === 'following'" class="divide-y divide-[color:var(--border-color)]">
             <div class="px-6 py-5">
               <div class="text-xl font-semibold text-[color:var(--text-primary)]">
@@ -3781,6 +3977,7 @@ watch(
                 <button 
                   v-for="tab in [
                     { id: 'posts', label: '摩文' },
+                    { id: 'latest', label: '最新' },
                     { id: 'topics', label: '话题' },
                     { id: 'users', label: '用户' },
                     { id: 'news', label: '新闻' }
@@ -3811,6 +4008,35 @@ watch(
                 </div>
                 <PostFeedCard
                   v-for="post in exploreTimeline"
+                  :key="post.id"
+                  :post="post"
+                  :avatar-url="userAvatarUrl(post.authorId)"
+                  :liked="likedPosts[post.id]"
+                  :bookmarked="bookmarkedPosts[post.id]"
+                  :current-user-id="currentUser?.id"
+                  :mention-users="people"
+                  :show-more-menu="true"
+                  :more-menu-open="activeMoreMenuId === post.id"
+                  @open-profile="goToUserProfile"
+                  @open-detail="openPostDetail"
+                  @forward="openForwardDialog"
+                  @toggle-like="toggleLike"
+                  @toggle-bookmark="toggleBookmark"
+                  @toggle-more="toggleMoreMenu"
+                  @menu-action="handleMenuAction"
+                  @vote="handleVote"
+                />
+              </template>
+
+              <template v-else-if="activeExploreTab === 'latest'">
+                <div v-if="latestPostsLoading" class="p-6 text-sm text-[color:var(--text-muted)]">
+                  最新加载中...
+                </div>
+                <div v-else-if="timeline.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
+                  目前没有最新普通摩文。
+                </div>
+                <PostFeedCard
+                  v-for="post in timeline"
                   :key="post.id"
                   :post="post"
                   :avatar-url="userAvatarUrl(post.authorId)"
@@ -3925,10 +4151,10 @@ watch(
                 <div v-if="newsLoading" class="p-6 text-sm text-[color:var(--text-muted)]">
                   新闻加载中...
                 </div>
-                <div v-else-if="newsPosts.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
+                <div v-else-if="newsTimeline.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
                   目前没有最新的新闻摩文。
                 </div>
-                <article v-for="post in newsPosts" :key="post.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
+                <article v-for="post in newsTimeline" :key="post.id" class="p-6 transition hover:bg-[var(--panel-soft)]">
                    <div class="flex gap-4">
                     <div class="h-12 w-12 flex-none rounded-2xl bg-emerald-600 flex items-center justify-center text-white">
                       <Newspaper class="w-6 h-6" />
@@ -4170,7 +4396,12 @@ watch(
                                 </div>
                               </button>
                             </template>
-                            <div v-else>{{ message.text }}</div>
+                            <div v-else>
+                              <div v-if="message.text">{{ message.text }}</div>
+                              <div v-if="message.imageEmoji?.preview" class="mt-2 overflow-hidden rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-contrast)]">
+                                <img :src="message.imageEmoji.preview" :alt="message.imageEmoji.name || '图片表情'" class="max-h-56 w-full h-auto object-contain" />
+                              </div>
+                            </div>
                             <div class="mt-2 text-[11px] text-[color:var(--text-muted)]">{{ message.time }}</div>
                           </div>
                         </template>
@@ -4200,7 +4431,12 @@ watch(
                                 </div>
                               </button>
                             </template>
-                            <div v-else>{{ message.text }}</div>
+                            <div v-else>
+                              <div v-if="message.text">{{ message.text }}</div>
+                              <div v-if="message.imageEmoji?.preview" class="mt-2 overflow-hidden rounded-xl border border-emerald-300/30 bg-white/10">
+                                <img :src="message.imageEmoji.preview" :alt="message.imageEmoji.name || '图片表情'" class="max-h-56 w-full h-auto object-contain" />
+                              </div>
+                            </div>
                             <div class="mt-2 text-[11px]" :class="message.forwardedPost ? 'text-slate-400' : 'text-emerald-100/80'">{{ message.time }}</div>
                           </div>
                           <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
@@ -4225,7 +4461,17 @@ watch(
                         <template v-else>{{ avatarText(currentUser?.displayName || 'U') }}</template>
                       </div>
                       <div class="min-w-0 flex-1 rounded-3xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-4 py-3">
+                        <div v-if="messageMediaPreview && messageMediaMeta" class="relative mb-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)]">
+                          <img :src="messageMediaPreview" :alt="messageMediaMeta.name" class="max-h-44 w-full object-contain bg-[var(--panel-contrast)]" />
+                          <button
+                            @click="clearMessageMedia"
+                            class="absolute right-2 top-2 rounded-full bg-black/55 px-2 py-1 text-[11px] text-white hover:bg-black/70"
+                          >
+                            移除
+                          </button>
+                        </div>
                         <textarea
+                          ref="messageInputRef"
                           v-model="messageDraft"
                           @keydown.enter.prevent="sendMessage"
                           rows="3"
@@ -4234,14 +4480,52 @@ watch(
                           class="w-full resize-none bg-transparent text-sm leading-6 text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
                         />
                         <div class="mt-3 flex items-center justify-between gap-3">
-                          <div class="text-xs text-[color:var(--text-muted)]">{{ messageDraft.trim().length }}/1000</div>
+                          <div class="flex items-center gap-2">
+                            <input ref="messageImageInputRef" type="file" accept="image/*" class="hidden" @change="handleMessageMediaChange" />
+                            <button @click="triggerMessageImagePicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" title="发送图片表情">
+                              <ImageIcon class="h-4 w-4" />
+                            </button>
+                            <button ref="messageStickerTriggerRef" @click.stop="toggleMessageStickerPanel" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showMessageStickerPanel ? 'text-emerald-500 bg-emerald-500/10' : ''" title="图片表情库">
+                              <Smile class="h-4 w-4" />
+                            </button>
+                            <button ref="messageEmojiTriggerRef" @click.stop="toggleMessageEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showMessageEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                              <Pencil class="h-4 w-4" />
+                            </button>
+                            <div class="text-xs text-[color:var(--text-muted)]">{{ messageDraft.trim().length }}/1000</div>
+                          </div>
                           <button
-                            :disabled="!messageDraft.trim() || saving"
+                            :disabled="(!messageDraft.trim() && !messageMediaPreview) || saving"
                             @click="sendMessage"
                             class="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {{ saving ? '发送中...' : '发送消息' }}
                           </button>
+                        </div>
+
+                        <div
+                          v-if="showMessageStickerPanel"
+                          ref="messageStickerPanelRef"
+                          class="mt-3 max-h-52 overflow-y-auto rounded-2xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] p-3"
+                        >
+                          <div v-if="recentMessageStickers.length === 0" class="text-xs text-[color:var(--text-muted)]">发送过的图片会自动出现在这里。</div>
+                          <div v-else class="grid grid-cols-5 gap-2">
+                            <button
+                              v-for="(sticker, idx) in recentMessageStickers"
+                              :key="`${sticker.preview}-${idx}`"
+                              @click="useStickerAsMessage(sticker)"
+                              class="overflow-hidden rounded-lg border border-[color:var(--border-color)] bg-[var(--panel-contrast)] transition hover:border-emerald-400/60"
+                            >
+                              <img :src="sticker.preview" :alt="sticker.name || '图片表情'" class="h-14 w-full object-cover" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div
+                          v-if="showMessageEmojiPicker"
+                          ref="messageEmojiPanelRef"
+                          class="mt-3 overflow-hidden rounded-2xl border border-[color:var(--border-color)] bg-[var(--frame-bg)]"
+                        >
+                          <emoji-picker @emoji-click="handleMessageEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
                         </div>
                       </div>
                     </div>
