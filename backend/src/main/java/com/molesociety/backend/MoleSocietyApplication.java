@@ -2577,13 +2577,24 @@ class SocialService {
 
   private List<FederationInstance> liveInstances() {
     Map<String, Integer> onlineByInstance = activeSessions.countOnlineByInstance(users);
+    Map<String, Integer> usersByInstance = new HashMap<>();
+    for (SocialUser user : users) {
+      if (!Strings.hasText(user.instance)) continue;
+      usersByInstance.merge(user.instance, 1, Integer::sum);
+    }
     List<FederationInstance> result = new ArrayList<>();
     for (FederationInstance item : instances) {
       int online = onlineByInstance.getOrDefault(item.name, 0);
+      if (online <= 0) {
+        online = Math.max(0, usersByInstance.getOrDefault(item.name, 0));
+      }
       long postCount = posts.stream().filter(post -> item.name.equals(post.instance)).count();
-      String members = Strings.hasText(item.members) ? item.members : online + " 人在线";
-      String latency = Strings.hasText(item.latency) ? item.latency : measuredInstanceLatency(item.name);
-      String status = Strings.hasText(item.status) ? item.status : (online > 0 || postCount > 0 ? "healthy" : "idle");
+      String members = online + " 人在线";
+      String measuredLatency = measuredInstanceLatency(item.name);
+      String latency = ("未探测".equals(measuredLatency) || "不可达".equals(measuredLatency))
+          ? Strings.or(item.latency, measuredLatency)
+          : measuredLatency;
+      String status = online > 0 || postCount > 0 ? "运行中" : Strings.or(item.status, "空闲");
       FederationInstance live = new FederationInstance(
           item.name,
           item.focus,

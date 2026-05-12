@@ -821,6 +821,14 @@ const followedTopicCards = computed(() => {
   return ranked;
 });
 
+const visibleInstances = computed(() => {
+  return (Array.isArray(instances.value) ? instances.value : []).map((item) => ({
+    ...item,
+    members: String(item.members || '0 人在线'),
+    latency: String(item.latency || '未探测'),
+  }));
+});
+
 const topicTimeline = computed(() => {
   const tag = normalizeTopicTag(selectedTopicTag.value);
   if (!tag) return [];
@@ -1575,6 +1583,16 @@ function applyBootstrap(payload: BootstrapPayload) {
     .filter((conversation) => conversation.participantId && conversation.participantId !== currentUser.value?.id);
   conversations.value = sortConversationsByLatestMessage(mappedConversations);
   instances.value = payload.instances;
+  if (instances.value.length > 0) {
+    const currentInstance = String(currentUser.value?.instance || '').trim();
+    const hasCurrent = instances.value.some((item) => item.name === currentInstance);
+    const hasSelected = instances.value.some((item) => item.name === selectedInstanceName.value);
+    if (selectedInstanceName.value === 'all') {
+      selectedInstanceName.value = hasCurrent ? currentInstance : instances.value[0].name;
+    } else if (!hasSelected) {
+      selectedInstanceName.value = hasCurrent ? currentInstance : instances.value[0].name;
+    }
+  }
   selectedConversationId.value = conversations.value[0]?.id ?? '';
   void syncFollowerNotifications();
 }
@@ -4052,16 +4070,13 @@ watch(
               <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择实例后将返回主页并按该实例筛选摩文。</div>
             </div>
             <article class="px-6 py-4 transition hover:bg-[var(--panel-soft)]">
-              <button @click="selectInstance('all'); setSection('home')" class="w-full text-left">
+              <button @click="selectInstance('all')" class="w-full text-left">
                 <div class="text-base font-semibold" :class="selectedInstanceName === 'all' ? 'text-emerald-500' : 'text-[color:var(--text-primary)]'">全部摩尔实例</div>
-                <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ instances.length }} 个实例</div>
+                <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ visibleInstances.length }} 个实例</div>
               </button>
             </article>
-            <article v-if="instances.length === 0" class="px-6 py-12 text-center text-[color:var(--text-muted)]">
-              暂无实例数据。
-            </article>
-            <article v-for="instance in instances" :key="instance.name" class="px-6 py-4 transition hover:bg-[var(--panel-soft)]">
-              <button @click="selectInstance(instance.name); setSection('home')" class="w-full text-left">
+            <article v-for="instance in visibleInstances" :key="instance.name" class="px-6 py-4 transition hover:bg-[var(--panel-soft)]">
+              <button @click="selectInstance(instance.name)" class="w-full text-left">
                 <div class="text-base font-semibold" :class="selectedInstanceName === instance.name ? 'text-emerald-500' : 'text-[color:var(--text-primary)]'">{{ instance.name }}</div>
                 <div class="mt-1 text-sm text-[color:var(--text-muted)]">{{ instance.focus }} · {{ instance.members }} · {{ instance.latency }}</div>
               </button>
