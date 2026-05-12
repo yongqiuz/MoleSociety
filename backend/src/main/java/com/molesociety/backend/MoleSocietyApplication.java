@@ -1910,12 +1910,15 @@ class SocialService {
   }
 
   private void initNewsAutoPublisher() {
-    if (!Env.truthy(Env.get("NEWS_AUTO_ENABLED", "0"))) return;
-    int everyMinutes = (int) Math.max(5L, Env.longValue("NEWS_PULL_MINUTES", 1440L));
+    boolean hasFeeds = !configuredNewsFeeds().isEmpty();
+    String autoFlag = Strings.value(Env.get("NEWS_AUTO_ENABLED", hasFeeds ? "1" : "0"));
+    if (!Env.truthy(autoFlag)) return;
+    int everyMinutes = (int) Math.max(5L, Env.longValue("NEWS_PULL_MINUTES", 30L));
     long initialDelaySeconds = Math.max(5L, Env.longValue("NEWS_INITIAL_DELAY_SECONDS", 20L));
     synchronized (this) {
       rebuildNewsFingerprintIndex();
     }
+    newsScheduler.execute(this::pullNewsAndPublishSafe);
     newsScheduler.scheduleAtFixedRate(this::pullNewsAndPublishSafe, initialDelaySeconds, everyMinutes * 60L, TimeUnit.SECONDS);
   }
 
@@ -2240,6 +2243,15 @@ class SocialService {
 
   private List<String> configuredNewsFeeds() {
     String raw = Strings.value(Env.get("NEWS_FEED_URLS", ""));
+    if (!Strings.hasText(raw)) {
+      raw = Strings.value(Env.get("NEWS_FEED_URL", ""));
+    }
+    if (!Strings.hasText(raw)) {
+      raw = String.join(";",
+          "https://rsshub.app/ithome/ranking",
+          "https://rsshub.app/sina/news/china",
+          "https://rsshub.app/sina/news/world");
+    }
     List<String> feeds = new ArrayList<>();
     for (String item : raw.split("[,;\\n]")) {
       String url = Strings.value(item).trim();
