@@ -61,7 +61,7 @@ function formatHandleInstance(handle: string, instance: string) {
 
 function profileLabel(userInfo: SocialUser | null) {
   if (!userInfo) return '';
-  return userInfo.bio || 'MoleSociety member';
+  return userInfo.bio || '';
 }
 
 function relationTitle() {

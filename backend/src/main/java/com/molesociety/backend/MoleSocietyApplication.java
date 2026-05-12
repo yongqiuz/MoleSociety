@@ -1689,7 +1689,7 @@ class AuthService {
       persistence.deleteChallenge(req.nonce);
     }
 
-    SocialUser user = social.createUser(new CreateUserRequest(username, username, "MoleSociety member", social.primaryMoleInstanceName(), wallet, "", ""));
+    SocialUser user = social.createUser(new CreateUserRequest(username, username, "", social.primaryMoleInstanceName(), wallet, "", ""));
     Account account = new Account();
     account.id = "acc_" + System.nanoTime();
     account.username = username;
