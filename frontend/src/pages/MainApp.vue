@@ -454,6 +454,7 @@ const newsLoading = ref(false);
 const explorePostsTimeline = ref<FeedCard[]>([]);
 const explorePostsLoading = ref(false);
 const latestPostsLoading = ref(false);
+const searchWarmupLoading = ref(false);
 const instancePollingTimer = ref<number | null>(null);
 const instancePollingInFlight = ref(false);
 
@@ -780,6 +781,21 @@ async function loadLatestPostsTimeline(force = false) {
   }
 }
 
+async function warmupSearchPostPools() {
+  if (searchWarmupLoading.value) return;
+  if (!apiOnline.value) return;
+  searchWarmupLoading.value = true;
+  try {
+    await Promise.allSettled([
+      loadLatestPostsTimeline(true),
+      loadExplorePostsTimeline(true),
+      loadNewsTimeline(true),
+    ]);
+  } finally {
+    searchWarmupLoading.value = false;
+  }
+}
+
 const selectedInstance = computed(() =>
   instances.value.find((instance) => instance.name === selectedInstanceName.value) ?? null,
 );
@@ -931,6 +947,15 @@ const searchedUsers = computed(() => {
       user.instance,
       user.wallet,
     ].join(' ').toLowerCase().includes(q))
+    .sort((a, b) => {
+      const ah = String(a.handle || '').replace(/^@/, '').toLowerCase();
+      const bh = String(b.handle || '').replace(/^@/, '').toLowerCase();
+      const an = String(a.displayName || '').toLowerCase();
+      const bn = String(b.displayName || '').toLowerCase();
+      const aScore = Number(ah === q) * 4 + Number(an === q) * 3 + Number(ah.startsWith(q)) * 2 + Number(an.startsWith(q));
+      const bScore = Number(bh === q) * 4 + Number(bn === q) * 3 + Number(bh.startsWith(q)) * 2 + Number(bn.startsWith(q));
+      return bScore - aScore;
+    })
     .slice(0, 20);
 });
 
@@ -1888,7 +1913,9 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
   const fallbackPeer = participantUsers.find((person) => person.id !== userId) ?? otherParticipants[0] ?? null;
   const displayParticipants = otherParticipants.length ? otherParticipants : fallbackPeer ? [fallbackPeer] : [];
 
-  const normalizedTitle = conversation.title.trim().replace(/^跨联邦[:：]\s*/u, '');
+  const normalizedTitle = conversation.title
+    .trim()
+    .replace(/^跨联邦(?:会话)?\s*[-:：]?\s*/u, '');
   const resolvedTitle =
     normalizedTitle ||
     displayParticipants.map((person) => person.displayName).join('、') ||
@@ -3356,6 +3383,7 @@ watch(
     const hasQuery = Boolean(value.trim());
     if (hasQuery) {
       currentSection.value = 'search';
+      void warmupSearchPostPools();
       return;
     }
     if (currentSection.value === 'search') {
@@ -3363,6 +3391,16 @@ watch(
     }
   },
 );
+
+function triggerSearchFromInput() {
+  const keyword = searchQuery.value.trim();
+  if (!keyword) {
+    if (currentSection.value === 'search') currentSection.value = 'home';
+    return;
+  }
+  currentSection.value = 'search';
+  void warmupSearchPostPools();
+}
 </script>
 
 <template>
@@ -3379,12 +3417,22 @@ watch(
       <div v-if="!loading" class="grid gap-0 overflow-visible lg:h-[calc(100vh-24px)] lg:grid-cols-[260px_minmax(0,1fr)_240px]">
         <aside class="relative z-[80] min-h-0 max-h-[calc(100vh-24px)] overflow-visible border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:max-h-none lg:border-b-0 lg:border-r">
           <div class="max-h-[calc(100vh-24px)] min-h-0 space-y-3 overflow-y-auto overscroll-contain p-4 no-scrollbar lg:h-full lg:max-h-none">
-            <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-4">
+            <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3">
+              <div class="flex items-center gap-2">
               <input
                 v-model="searchQuery"
+                @keydown.enter.prevent="triggerSearchFromInput"
                 placeholder="搜索或输入网址"
                 class="w-full bg-transparent text-sm text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
               />
+                <button
+                  @click="triggerSearchFromInput"
+                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-emerald-500"
+                  title="搜索"
+                >
+                  <Search class="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <div
@@ -3801,6 +3849,20 @@ watch(
             <div class="px-6 py-4">
               <div class="text-xs uppercase tracking-wider text-[color:var(--text-muted)]">关键词</div>
               <div class="mt-1 text-lg font-semibold text-[color:var(--text-primary)]">{{ searchQuery }}</div>
+              <div class="mt-1 text-xs text-[color:var(--text-muted)]">
+                找到 {{ searchedUsers.length }} 位用户，{{ searchedPosts.length }} 条帖子
+              </div>
+            </div>
+
+            <div v-if="searchWarmupLoading" class="px-6 py-4">
+              <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">搜索中...</div>
+              <div class="space-y-3">
+                <div v-for="idx in 4" :key="`search-skeleton-${idx}`" class="rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3">
+                  <div class="h-3.5 w-28 animate-pulse rounded bg-[var(--chip-bg)]"></div>
+                  <div class="mt-2 h-3 w-full animate-pulse rounded bg-[var(--chip-bg)]"></div>
+                  <div class="mt-1.5 h-3 w-4/5 animate-pulse rounded bg-[var(--chip-bg)]"></div>
+                </div>
+              </div>
             </div>
 
             <div class="px-6 py-4">
