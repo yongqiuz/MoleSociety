@@ -390,7 +390,31 @@ const { themeStyles, appearanceSettings } = useAppearance();
 
 const activeExploreTab = ref<ExploreTab>('posts');
 
-const newsPosts = computed(() => posts.value.filter(p => p.type === 'news'));
+const newsPosts = computed(() => posts.value.filter((p) => {
+  const normalizedType = String(p.type || '').trim().toLowerCase();
+  if (normalizedType === 'news') return true;
+  const tags = Array.isArray(p.tags) ? p.tags : [];
+  if (tags.some((tag) => String(tag).includes('新闻') || String(tag).includes('热点'))) return true;
+  const handle = String(p.handle || '').trim().toLowerCase();
+  if (handle === '@news_bot' || handle === 'news_bot') return true;
+  return String(p.content || '').trim().startsWith('【');
+}));
+
+function parseNewsContent(content: string) {
+  const text = String(content || '').trim();
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  const first = lines[0] || '';
+  const link = lines.find((line) => /^https?:\/\//i.test(line)) || '';
+  const sourceMatch = first.match(/^【([^】]+)】(.*)$/);
+  if (!sourceMatch) {
+    return { source: '新闻', title: first || text, link };
+  }
+  return {
+    source: sourceMatch[1] || '新闻',
+    title: (sourceMatch[2] || '').trim() || first,
+    link,
+  };
+}
 const activeMoreMenuId = ref<string | null>(null);
 
 function toggleMoreMenu(postId: string) {
@@ -3849,10 +3873,19 @@ watch(
                     </div>
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between mb-1">
-                        <span class="font-bold text-emerald-500">官方新闻</span>
+                        <span class="font-bold text-emerald-500">{{ parseNewsContent(post.content).source }}</span>
                         <span class="text-sm text-[color:var(--text-muted)]">{{ post.time }}</span>
                       </div>
-                      <div class="text-[17px] leading-relaxed text-[color:var(--text-primary)] font-medium whitespace-pre-wrap">{{ post.content }}</div>
+                      <div class="text-[17px] leading-relaxed text-[color:var(--text-primary)] font-medium whitespace-pre-wrap">{{ parseNewsContent(post.content).title }}</div>
+                      <a
+                        v-if="parseNewsContent(post.content).link"
+                        :href="parseNewsContent(post.content).link"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="mt-2 inline-block break-all text-sm text-cyan-500 hover:text-cyan-400 hover:underline"
+                      >
+                        {{ parseNewsContent(post.content).link }}
+                      </a>
 
                       <!-- News Poll Display -->
                       <div v-if="post.poll" class="mt-4 space-y-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">

@@ -44,6 +44,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.bouncycastle.jcajce.provider.digest.Keccak;
 import org.springframework.boot.SpringApplication;
@@ -2367,6 +2369,48 @@ class SocialService {
     return sha256Hex(Strings.value(value).trim().toLowerCase(Locale.ROOT));
   }
 
+  private String fetchNewsCoverImage(String articleUrl) {
+    try {
+      HttpURLConnection conn = (HttpURLConnection) URI.create(articleUrl).toURL().openConnection();
+      conn.setRequestMethod("GET");
+      conn.setConnectTimeout(4000);
+      conn.setReadTimeout(5000);
+      conn.setRequestProperty("User-Agent", "MoleSocietyNewsBot/1.0");
+      conn.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+      try (InputStream in = conn.getInputStream()) {
+        String html = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        String og = extractMetaContent(html, "property", "og:image");
+        if (!Strings.hasText(og)) og = extractMetaContent(html, "name", "twitter:image");
+        if (!Strings.hasText(og)) return "";
+        return resolveMaybeRelativeUrl(articleUrl, og.trim());
+      } finally {
+        conn.disconnect();
+      }
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
+  private String extractMetaContent(String html, String key, String value) {
+    String pattern = "<meta[^>]*" + key + "\\s*=\\s*['\\\"]" + Pattern.quote(value) + "['\\\"][^>]*content\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"][^>]*>";
+    Matcher matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE).matcher(html);
+    if (matcher.find()) return matcher.group(1);
+    pattern = "<meta[^>]*content\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"][^>]*" + key + "\\s*=\\s*['\\\"]" + Pattern.quote(value) + "['\\\"][^>]*>";
+    matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE).matcher(html);
+    if (matcher.find()) return matcher.group(1);
+    return "";
+  }
+
+  private String resolveMaybeRelativeUrl(String base, String target) {
+    try {
+      URI targetUri = URI.create(target);
+      if (targetUri.isAbsolute()) return target;
+      return URI.create(base).resolve(targetUri).toString();
+    } catch (Exception ignored) {
+      return target;
+    }
+  }
+
   private SocialPost createNewsPost(SocialUser author, NewsEntry entry) {
     SocialPost post = new SocialPost();
     post.id = nextID("post");
@@ -2381,6 +2425,17 @@ class SocialService {
     post.attestationUri = "news://attestation/" + post.id;
     post.tags = List.of("新闻", "热点");
     post.media = new ArrayList<>();
+    String cover = fetchNewsCoverImage(entry.link);
+    if (Strings.hasText(cover)) {
+      PostMedia coverMedia = new PostMedia();
+      coverMedia.id = nextID("media");
+      coverMedia.name = "news-cover";
+      coverMedia.url = cover;
+      coverMedia.kind = "image";
+      coverMedia.storageUri = "news://cover/" + post.id;
+      coverMedia.cid = "";
+      post.media.add(coverMedia);
+    }
     post.type = "news";
     post.interaction = "anyone";
     post.parentPostId = "";
