@@ -386,6 +386,24 @@ class SocialController {
     return ApiResponse.ok(Env.truthy(mine) ? social.feedMine(limit, userID) : social.feed(limit, userID));
   }
 
+  @GetMapping("/news")
+  ResponseEntity<ApiResponse<PagedResult<SocialPost>>> news(@RequestParam(defaultValue = "20") int limit, @RequestParam(defaultValue = "0") int offset, HttpServletRequest request) {
+    String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+    return ApiResponse.ok(social.news(limit, offset, userID));
+  }
+
+  @GetMapping("/hot")
+  ResponseEntity<ApiResponse<PagedResult<SocialPost>>> hot(@RequestParam(defaultValue = "20") int limit, @RequestParam(defaultValue = "0") int offset, HttpServletRequest request) {
+    String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+    return ApiResponse.ok(social.hot(limit, offset, userID));
+  }
+
+  @GetMapping("/latest")
+  ResponseEntity<ApiResponse<PagedResult<SocialPost>>> latest(@RequestParam(defaultValue = "20") int limit, @RequestParam(defaultValue = "0") int offset, HttpServletRequest request) {
+    String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
+    return ApiResponse.ok(social.latest(limit, offset, userID));
+  }
+
   @PostMapping("/posts")
   ResponseEntity<ApiResponse<SocialPost>> createPost(@RequestBody CreatePostRequest req, HttpServletRequest request) {
     try {
@@ -2170,6 +2188,37 @@ class SocialService {
         .toList(), limit);
   }
 
+  synchronized PagedResult<SocialPost> news(int limit, int offset, String currentUserID) {
+    List<SocialPost> items = posts.stream()
+        .filter(p -> !Strings.hasText(p.parentPostId))
+        .filter(this::isNewsPost)
+        .filter(p -> canViewPost(p, currentUserID))
+        .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
+        .toList();
+    return page(items, limit, offset);
+  }
+
+  synchronized PagedResult<SocialPost> hot(int limit, int offset, String currentUserID) {
+    List<SocialPost> items = posts.stream()
+        .filter(p -> !Strings.hasText(p.parentPostId))
+        .filter(p -> !isNewsPost(p))
+        .filter(p -> canViewPost(p, currentUserID))
+        .sorted(Comparator.comparingDouble(this::hotScore).reversed()
+            .thenComparing((SocialPost p) -> p.createdAt, Comparator.reverseOrder()))
+        .toList();
+    return page(items, limit, offset);
+  }
+
+  synchronized PagedResult<SocialPost> latest(int limit, int offset, String currentUserID) {
+    List<SocialPost> items = posts.stream()
+        .filter(p -> !Strings.hasText(p.parentPostId))
+        .filter(p -> !isNewsPost(p))
+        .filter(p -> canViewPost(p, currentUserID))
+        .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
+        .toList();
+    return page(items, limit, offset);
+  }
+
   synchronized SocialPost createPost(CreatePostRequest req) {
     SocialUser author = getUser(req.authorId);
     SocialPost post = new SocialPost();
@@ -2987,6 +3036,43 @@ class SocialService {
     return new ArrayList<>(items.subList(0, size));
   }
 
+  private static <T> PagedResult<T> page(List<T> items, int limit, int offset) {
+    int safeLimit = Math.max(1, Math.min(limit <= 0 ? 20 : limit, 100));
+    int safeOffset = Math.max(0, offset);
+    int from = Math.min(safeOffset, items.size());
+    int to = Math.min(from + safeLimit, items.size());
+    PagedResult<T> result = new PagedResult<>();
+    result.items = new ArrayList<>(items.subList(from, to));
+    result.limit = safeLimit;
+    result.offset = safeOffset;
+    result.nextOffset = to;
+    result.hasMore = to < items.size();
+    result.total = items.size();
+    return result;
+  }
+
+  private boolean isNewsPost(SocialPost post) {
+    if (post == null) return false;
+    if ("news".equalsIgnoreCase(Strings.or(post.type, ""))) return true;
+    if (post.tags != null && post.tags.stream().anyMatch(tag -> "新闻".equalsIgnoreCase(Strings.or(tag, "")))) return true;
+    return "@news_bot".equalsIgnoreCase(Strings.or(post.authorHandle, ""));
+  }
+
+  private double hotScore(SocialPost post) {
+    double engagement = post.likes * 1.0 + post.boosts * 2.0 + post.replies * 1.5 + post.bookmarks * 1.2;
+    double ageHours = Math.max(0d, Duration.between(safeParseInstant(post.createdAt), Instant.now()).toMinutes() / 60d);
+    double decay = Math.pow(ageHours + 2d, 1.35d);
+    return engagement / decay;
+  }
+
+  private Instant safeParseInstant(String value) {
+    try {
+      return Instant.parse(Strings.or(value, ""));
+    } catch (Exception ignore) {
+      return Instant.now();
+    }
+  }
+
   private static String normalizeHandle(String handle) {
     String trimmed = handle.trim();
     return trimmed.startsWith("@") ? trimmed : "@" + trimmed;
@@ -3354,6 +3440,15 @@ class BootstrapPayload {
   public List<MediaAsset> media = new ArrayList<>();
   public List<Conversation> conversations = new ArrayList<>();
   public List<FederationInstance> instances = new ArrayList<>();
+}
+
+class PagedResult<T> {
+  public List<T> items = new ArrayList<>();
+  public int limit;
+  public int offset;
+  public int nextOffset;
+  public boolean hasMore;
+  public int total;
 }
 
 class AuthChallenge {
