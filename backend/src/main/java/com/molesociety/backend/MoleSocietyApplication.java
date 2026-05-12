@@ -2915,12 +2915,20 @@ class SocialService {
     Map<String, String> result = new HashMap<>();
     String raw = Env.get("INSTANCE_PROBE_URLS", "");
     for (String entry : raw.split("[,;]")) {
-      int idx = entry.indexOf('=');
-      if (idx <= 0) continue;
-      String name = entry.substring(0, idx).trim();
-      String url = entry.substring(idx + 1).trim();
-      if (Strings.hasText(name) && Strings.hasText(url)) {
-        result.put(name, url);
+      String trimmed = entry.trim();
+      if (!Strings.hasText(trimmed)) continue;
+      int idx = trimmed.indexOf('=');
+      if (idx > 0) {
+        String name = trimmed.substring(0, idx).trim();
+        String url = trimmed.substring(idx + 1).trim();
+        if (Strings.hasText(name) && Strings.hasText(url)) {
+          result.put(name, url);
+        }
+        continue;
+      }
+      // Backward-compatible shorthand: a bare URL maps to primary instance probe.
+      if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        result.put(primaryMoleInstanceName(), trimmed);
       }
     }
     return result;
