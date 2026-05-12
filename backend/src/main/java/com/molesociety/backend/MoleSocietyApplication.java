@@ -42,6 +42,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.regex.Matcher;
@@ -2781,6 +2782,10 @@ class SocialService {
   }
 
   private String measuredInstanceLatency(String instanceName) {
+    if ("摩尔2号".equals(instanceName) || "摩尔3号".equals(instanceName)) {
+      int mockLatency = ThreadLocalRandom.current().nextInt(0, 201);
+      return mockLatency + " ms";
+    }
     String probeURL = instanceProbeURLs().get(instanceName);
     if (!Strings.hasText(probeURL)) return "未探测";
     try {

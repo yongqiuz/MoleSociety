@@ -167,7 +167,7 @@ function avatarText(name: string) {
             class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
             :class="liked ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
           >
-            <Heart :class="{ 'fill-current': liked }" class="mr-1.5 h-[18px] w-[18px]" /> {{ post.stats.likes + (liked ? 1 : 0) || '' }}
+            <Heart :class="{ 'fill-current': liked }" class="mr-1.5 h-[18px] w-[18px]" /> {{ post.stats.likes ?? 0 }}
           </button>
           <button
             @click="emit('toggle-bookmark', post.id)"
@@ -175,7 +175,7 @@ function avatarText(name: string) {
             :class="bookmarked ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
           >
             <Bookmark :class="{ 'fill-current': bookmarked }" class="mr-1.5 h-[18px] w-[18px]" />
-            {{ post.stats.bookmarks || '' }}
+            {{ post.stats.bookmarks ?? 0 }}
           </button>
 
           <div v-if="showMoreMenu" class="relative ml-auto">

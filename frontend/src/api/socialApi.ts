@@ -257,6 +257,10 @@ export async function fetchSocialInstances() {
   return request<FederationInstance[]>('/social/instances');
 }
 
+export async function fetchSocialUsers() {
+  return request<SocialUser[]>('/social/users');
+}
+
 export async function fetchUser(userId: string) {
   return request<SocialUser>(`/social/users/${userId}`);
 }

@@ -12,6 +12,7 @@ import {
   fetchPostReplies,
   fetchPostThread,
   fetchSocialBootstrap,
+  fetchSocialUsers,
   fetchSocialHot,
   fetchSocialLatest,
   fetchSocialNews,
@@ -454,6 +455,8 @@ const newsLoading = ref(false);
 const explorePostsTimeline = ref<FeedCard[]>([]);
 const explorePostsLoading = ref(false);
 const latestPostsLoading = ref(false);
+const exploreUsersLoading = ref(false);
+const exploreUsers = ref<SocialUser[]>([]);
 const searchWarmupLoading = ref(false);
 const instancePollingTimer = ref<number | null>(null);
 const instancePollingInFlight = ref(false);
@@ -855,7 +858,8 @@ async function selectInstance(name: string) {
 
 const recommendedPeople = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
-  return people.value
+  const source = exploreUsers.value.length > 0 ? exploreUsers.value : people.value;
+  return source
     .filter((person) => person.id !== currentUser.value?.id)
     .filter((person) =>
       !query ||
@@ -866,10 +870,32 @@ const recommendedPeople = computed(() => {
     );
 });
 
+async function loadExploreUsers(force = false) {
+  if (exploreUsersLoading.value) return;
+  if (!force && exploreUsers.value.length > 0) return;
+  if (!apiOnline.value) return;
+  exploreUsersLoading.value = true;
+  try {
+    const users = await fetchSocialUsers();
+    exploreUsers.value = users;
+    people.value = users;
+  } catch {
+    // keep existing list on failure
+  } finally {
+    exploreUsersLoading.value = false;
+  }
+}
+
 const trendingTags = computed(() => {
   const bucket = new Map<string, number>();
-  posts.value.forEach((post) => {
-    post.tags.forEach((tag) => {
+  allKnownPosts.value.forEach((post) => {
+    const tags = [
+      ...(Array.isArray(post.tags) ? post.tags : []),
+      ...extractContentTopicTags(post.content),
+    ]
+      .map(normalizeTopicTag)
+      .filter(Boolean);
+    tags.forEach((tag) => {
       bucket.set(tag, (bucket.get(tag) ?? 0) + 1);
     });
   });
@@ -917,9 +943,27 @@ const currentSectionInfo = computed(() => {
   return { label: '主页', icon: Home };
 });
 
-const likedTimeline = computed(() => posts.value.filter((post) => likedPosts.value[post.id]));
+const allKnownPosts = computed(() => {
+  const pool: FeedCard[] = [
+    ...posts.value,
+    ...myPosts.value,
+    ...explorePostsTimeline.value,
+    ...newsTimeline.value,
+    ...threadAncestors.value,
+    ...threadReplies.value,
+    ...(threadFocusPost.value ? [threadFocusPost.value] : []),
+  ];
+  const uniq = new Map<string, FeedCard>();
+  pool.forEach((post) => {
+    if (!post?.id || uniq.has(post.id)) return;
+    uniq.set(post.id, post);
+  });
+  return [...uniq.values()];
+});
 
-const bookmarkedTimeline = computed(() => posts.value.filter((post) => bookmarkedPosts.value[post.id]));
+const likedTimeline = computed(() => allKnownPosts.value.filter((post) => likedPosts.value[post.id]));
+
+const bookmarkedTimeline = computed(() => allKnownPosts.value.filter((post) => bookmarkedPosts.value[post.id]));
 
 function normalizeSearchText(raw: string) {
   return String(raw || '').trim().toLowerCase();
@@ -1179,13 +1223,15 @@ function applyInstanceMemberSwitch(fromName: string, toName: string) {
 const topicTimeline = computed(() => {
   const tag = normalizeTopicTag(selectedTopicTag.value);
   if (!tag) return [];
-  return timeline.value.filter((post) => {
+  return allKnownPosts.value
+    .filter((post) => {
     const tags = [
       ...(Array.isArray(post.tags) ? post.tags : []),
       ...extractContentTopicTags(post.content),
     ].map(normalizeTopicTag);
     return tags.includes(tag);
-  });
+    })
+    .sort((a, b) => postCreatedAtTs(b) - postCreatedAtTs(a));
 });
 
 function openTopicTagFeed(tag: string) {
@@ -1222,7 +1268,8 @@ function isPostMentioningCurrentUser(post: FeedCard) {
 
 const mentionItems = computed(() => {
   if (!currentUser.value) return [];
-  return posts.value
+  return allKnownPosts.value
+    .filter((post) => post.authorId !== currentUser.value?.id)
     .filter(isPostMentioningCurrentUser)
     .map((post) => ({
       id: post.id,
@@ -1318,14 +1365,41 @@ function setSection(section: Section) {
   }
 }
 
+function updatePostInList(list: FeedCard[], postId: string, updater: (post: FeedCard) => FeedCard) {
+  return list.map((item) => (item.id === postId ? updater(item) : item));
+}
+
+function bumpPostStatEverywhere(postId: string, field: 'likes' | 'bookmarks', delta: number) {
+  const apply = (post: FeedCard): FeedCard => ({
+    ...post,
+    stats: {
+      ...post.stats,
+      [field]: Math.max(0, Number(post.stats[field] || 0) + delta),
+    },
+  });
+  posts.value = updatePostInList(posts.value, postId, apply);
+  myPosts.value = updatePostInList(myPosts.value, postId, apply);
+  explorePostsTimeline.value = updatePostInList(explorePostsTimeline.value, postId, apply);
+  newsTimeline.value = updatePostInList(newsTimeline.value, postId, apply);
+  threadAncestors.value = updatePostInList(threadAncestors.value, postId, apply);
+  threadReplies.value = updatePostInList(threadReplies.value, postId, apply);
+  if (threadFocusPost.value?.id === postId) {
+    threadFocusPost.value = apply(threadFocusPost.value);
+  }
+}
+
 function toggleLike(postId: string) {
-  likedPosts.value = { ...likedPosts.value, [postId]: !likedPosts.value[postId] };
+  const next = !likedPosts.value[postId];
+  likedPosts.value = { ...likedPosts.value, [postId]: next };
+  bumpPostStatEverywhere(postId, 'likes', next ? 1 : -1);
 }
 
 function applyUpdatedPostEverywhere(updatedPost: SocialPost) {
   const card = toFeedCard(updatedPost);
   posts.value = posts.value.map((item) => (item.id === card.id ? card : item));
   myPosts.value = myPosts.value.map((item) => (item.id === card.id ? card : item));
+  explorePostsTimeline.value = explorePostsTimeline.value.map((item) => (item.id === card.id ? card : item));
+  newsTimeline.value = newsTimeline.value.map((item) => (item.id === card.id ? card : item));
   threadAncestors.value = threadAncestors.value.map((item) => (item.id === card.id ? card : item));
   threadReplies.value = threadReplies.value.map((item) => (item.id === card.id ? card : item));
   if (threadFocusPost.value?.id === card.id) {
@@ -2738,6 +2812,9 @@ function goToUserProfile(userId: string) {
 
 function togglePollEditor() {
   showPollEditor.value = !showPollEditor.value;
+  if (showPollEditor.value) {
+    pollMultiple.value = false;
+  }
 }
 
 function normalizeTag(raw: string) {
@@ -3057,7 +3134,7 @@ async function publishPost() {
       type: 'post',
       pollOptions: showPollEditor.value ? pollOptions.value.filter(o => o.trim()) : [],
       pollExpiresIn: showPollEditor.value ? pollExpiresIn.value : 0,
-      pollMultiple: showPollEditor.value ? pollMultiple.value : false,
+      pollMultiple: false,
     });
     const nextCard = toFeedCard(createdPost);
     posts.value = [nextCard, ...posts.value];
@@ -3072,6 +3149,10 @@ async function publishPost() {
     customTagInput.value = '';
     showTagPicker.value = false;
     showEmojiPicker.value = false;
+    showPollEditor.value = false;
+    pollOptions.value = ['', ''];
+    pollExpiresIn.value = 1440;
+    pollMultiple.value = false;
   } catch (error) {
     if (error instanceof ApiError && error.code === 'AUTH_SESSION_REQUIRED') {
       void router.push({ path: '/login', query: { redirect: '/app' } });
@@ -3307,15 +3388,23 @@ watch(
   ([section, tab]) => {
     if (section !== 'explore') return;
     if (tab === 'posts') {
-      void loadExplorePostsTimeline();
+      void loadExplorePostsTimeline(true);
       return;
     }
     if (tab === 'latest') {
-      void loadLatestPostsTimeline();
+      void loadLatestPostsTimeline(true);
+      return;
+    }
+    if (tab === 'topics') {
+      void warmupSearchPostPools();
+      return;
+    }
+    if (tab === 'users') {
+      void loadExploreUsers(true);
       return;
     }
     if (tab !== 'news') return;
-    void loadNewsTimeline();
+    void loadNewsTimeline(true);
   },
   { immediate: true },
 );
@@ -3439,21 +3528,34 @@ function triggerSearchFromInput() {
       <div v-if="!loading" class="grid gap-0 overflow-visible lg:h-[calc(100vh-24px)] lg:grid-cols-[260px_minmax(0,1fr)_240px]">
         <aside class="relative z-[80] min-h-0 max-h-[calc(100vh-24px)] overflow-visible border-b border-[color:var(--border-color)] bg-[var(--panel-bg)] lg:h-[calc(100vh-32px)] lg:max-h-none lg:border-b-0 lg:border-r">
           <div class="max-h-[calc(100vh-24px)] min-h-0 space-y-3 overflow-y-auto overscroll-contain p-4 no-scrollbar lg:h-full lg:max-h-none">
-            <div class="rounded-2xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3">
-              <div class="flex items-center gap-2">
-              <input
-                v-model="searchQuery"
-                @keydown.enter.prevent="triggerSearchFromInput"
-                placeholder="搜索或输入网址"
-                class="w-full bg-transparent text-sm text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
-              />
+            <div class="rounded-2xl border border-emerald-500/25 bg-[var(--panel-soft)] px-3 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
+              <div class="flex items-center gap-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--frame-bg)] px-3 py-2.5 focus-within:border-emerald-500/60 focus-within:shadow-[0_0_0_2px_rgba(16,185,129,0.15)]">
+                <Search class="h-4 w-4 shrink-0 text-emerald-400" />
+                <input
+                  v-model="searchQuery"
+                  @focus="currentSection = 'search'"
+                  @keydown.enter.prevent="triggerSearchFromInput"
+                  placeholder="搜索用户或帖子"
+                  class="w-full bg-transparent text-sm text-[color:var(--text-primary)] outline-none placeholder:text-[color:var(--text-muted)]"
+                />
+                <button
+                  v-if="searchQuery.trim().length > 0"
+                  @click="searchQuery = ''"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
+                  title="清空"
+                >
+                  <X class="h-4 w-4" />
+                </button>
                 <button
                   @click="triggerSearchFromInput"
-                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[color:var(--text-secondary)] transition hover:bg-[var(--chip-hover)] hover:text-emerald-500"
+                  class="inline-flex h-8 shrink-0 items-center justify-center rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white transition hover:bg-emerald-500"
                   title="搜索"
                 >
-                  <Search class="h-4 w-4" />
+                  搜索
                 </button>
+              </div>
+              <div class="mt-2 px-1 text-[11px] text-[color:var(--text-muted)]">
+                支持昵称、账号、帖子正文、标签的模糊搜索
               </div>
             </div>
 
@@ -3587,9 +3689,9 @@ function triggerSearchFromInput() {
                     </div>
                     <div class="flex-1 space-y-1 border-l border-emerald-500/10 pl-4">
                       <label class="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">类型</label>
-                      <button @click="pollMultiple = !pollMultiple" class="block w-full text-left text-sm font-bold text-emerald-400">
-                        {{ pollMultiple ? '多选' : '单选' }}
-                      </button>
+                      <div class="block w-full text-left text-sm font-bold text-emerald-400">
+                        单选（暂不支持多选）
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3627,7 +3729,7 @@ function triggerSearchFromInput() {
                   v-if="showEmojiPicker"
                   ref="emojiPickerPanelRef"
                   @click.stop
-                  class="absolute bottom-full right-0 z-[260] mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-yellow-400/25 bg-[var(--panel-bg)] p-2 shadow-[0_20px_50px_rgba(0,0,0,0.38)]"
+                  class="absolute bottom-full right-0 z-[9999] mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-yellow-400/25 bg-[var(--panel-bg)] p-2 shadow-[0_20px_50px_rgba(0,0,0,0.38)]"
                 >
                   <emoji-picker @emoji-click="handleEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
                   <div class="mt-2 px-2 text-[11px] text-[color:var(--text-muted)]">点击表情即可插入</div>
@@ -3811,7 +3913,7 @@ function triggerSearchFromInput() {
                       @click="openPostDetail(post.id)"
                       class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
                     >
-                      <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies || '' }}
+                      <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.replies ?? 0 }}
                     </button>
                     <button
                       @click="openForwardDialog(post)"
@@ -3824,14 +3926,14 @@ function triggerSearchFromInput() {
                       class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                       :class="likedPosts[post.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
                     >
-                      <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
+                      <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes ?? 0 }}
                     </button>
                     <button
                       @click="toggleBookmark(post.id)"
                       class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                       :class="bookmarkedPosts[post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                     >
-                      <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks || '' }}
+                      <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks ?? 0 }}
                     </button>
                     
                     <!-- More Menu Wrapper -->
@@ -4105,7 +4207,7 @@ function triggerSearchFromInput() {
                       <button
                         class="inline-flex items-center rounded-[2rem] border border-[color:var(--border-color)] px-3 py-1.5 text-sm font-medium text-[color:var(--text-secondary)] transition-all hover:-translate-y-0.5 hover:shadow-sm hover:bg-[var(--chip-hover)] hover:text-[color:var(--text-primary)]"
                       >
-                        <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.replies || '' }}
+                        <MessageCircle class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.replies ?? 0 }}
                       </button>
                       <button
                         @click="openForwardDialog(threadFocusPost)"
@@ -4118,14 +4220,14 @@ function triggerSearchFromInput() {
                         class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                         :class="likedPosts[threadFocusPost.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
                       >
-                        <Heart :class="{'fill-current': likedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.likes + (likedPosts[threadFocusPost.id] ? 1 : 0) || '' }}
+                        <Heart :class="{'fill-current': likedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.likes ?? 0 }}
                       </button>
                       <button
                         @click="toggleBookmark(threadFocusPost.id)"
                         class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                         :class="bookmarkedPosts[threadFocusPost.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                       >
-                        <Bookmark :class="{'fill-current': bookmarkedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.bookmarks || '' }}
+                        <Bookmark :class="{'fill-current': bookmarkedPosts[threadFocusPost.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ threadFocusPost.stats.bookmarks ?? 0 }}
                       </button>
                     </div>
                   </div>
@@ -4581,6 +4683,12 @@ function triggerSearchFromInput() {
 
               <!-- Users Tab -->
               <template v-else-if="activeExploreTab === 'users'">
+                <div v-if="exploreUsersLoading" class="p-6 text-sm text-[color:var(--text-muted)]">
+                  用户加载中...
+                </div>
+                <div v-else-if="recommendedPeople.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
+                  暂无可展示用户。
+                </div>
                 <article
                   v-for="person in recommendedPeople"
                   :key="person.id"
@@ -4699,14 +4807,14 @@ function triggerSearchFromInput() {
                           class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-rose-500/10 hover:text-rose-400"
                           :class="likedPosts[post.id] ? 'text-rose-400' : 'text-[color:var(--text-secondary)]'"
                         >
-                          <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
+                          <Heart :class="{'fill-current': likedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.likes ?? 0 }}
                         </button>
                         <button
                           @click="toggleBookmark(post.id)"
                           class="inline-flex items-center rounded-lg border border-transparent px-2 py-1.5 font-medium transition-all hover:bg-indigo-500/10 hover:text-indigo-400"
                           :class="bookmarkedPosts[post.id] ? 'text-indigo-400' : 'text-[color:var(--text-secondary)]'"
                         >
-                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks || '' }}
+                          <Bookmark :class="{'fill-current': bookmarkedPosts[post.id]}" class="w-[18px] h-[18px] mr-1.5" /> {{ post.stats.bookmarks ?? 0 }}
                         </button>
                         
                         <!-- More Menu Wrapper -->
