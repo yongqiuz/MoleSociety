@@ -49,6 +49,7 @@ import PostFeedCard from '../components/posts/PostFeedCard.vue';
 
 type Section =
   | 'home'
+  | 'search'
   | 'postDetail'
   | 'explore'
   | 'messages'
@@ -116,6 +117,7 @@ type FeedCard = {
 
 type NotificationItem = {
   id: string;
+  kind: 'mention' | 'reply' | 'follow' | 'directMessage' | 'system' | 'digest';
   title: string;
   body: string;
   time: string;
@@ -404,8 +406,42 @@ const MENTION_READ_STORAGE_PREFIX = 'mole-mention-read';
 const FOLLOWER_SEEN_IDS_STORAGE_PREFIX = 'mole-follower-seen-ids';
 const MESSAGE_READ_AT_STORAGE_PREFIX = 'mole-message-read-at';
 const MESSAGE_STICKER_STORAGE_PREFIX = 'mole-message-stickers';
+const ENCRYPTED_MESSAGE_CACHE_STORAGE_PREFIX = 'mole-encrypted-message-cache';
+const MESSAGE_DEVICE_ID_STORAGE_PREFIX = 'mole-message-device-id';
+const MESSAGE_ENCRYPTION_KEY_STORAGE_PREFIX = 'mole-message-encryption-key';
 const INSTANCE_POLL_INTERVAL_MS = 2000;
-const DEFAULT_FEED_LIMIT = 200;
+const DEFAULT_FEED_LIMIT = 12;
+const NOTIFICATION_SETTINGS_STORAGE_KEY = 'mole-notification-settings';
+
+type NotificationSettings = {
+  mentions: boolean;
+  replies: boolean;
+  follows: boolean;
+  directMessages: boolean;
+  systemUpdates: boolean;
+  emailDigest: boolean;
+  quietHours: boolean;
+};
+
+const defaultNotificationSettings: NotificationSettings = {
+  mentions: true,
+  replies: true,
+  follows: true,
+  directMessages: true,
+  systemUpdates: true,
+  emailDigest: false,
+  quietHours: false,
+};
+
+type EncryptedMessageCacheEntry = {
+  version: 1;
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  algorithm: 'AES-256-GCM';
+  createdAt: number;
+  senderDeviceId: string;
+};
 
 const isLoggedIn = computed(() => !!authSession.value);
 const isReplyingRoot = computed(() => !!threadFocusPost.value && activeReplyTarget.value?.id === threadFocusPost.value.id);
@@ -836,6 +872,19 @@ const serviceNotice = computed(() =>
   errorMessage.value || '跨实例动态正在持续刷新。',
 );
 
+function allowNotificationKind(kind: NotificationItem['kind']) {
+  if (notificationSettings.value.quietHours) {
+    return kind === 'mention' || kind === 'directMessage' || kind === 'system';
+  }
+  if (kind === 'mention') return notificationSettings.value.mentions;
+  if (kind === 'reply') return notificationSettings.value.replies;
+  if (kind === 'follow') return notificationSettings.value.follows;
+  if (kind === 'directMessage') return notificationSettings.value.directMessages;
+  if (kind === 'system') return notificationSettings.value.systemUpdates;
+  if (kind === 'digest') return notificationSettings.value.emailDigest;
+  return true;
+}
+
 const currentSectionInfo = computed(() => {
   const allNavItems = [...primaryNavItems, ...secondaryNavItems, ...utilityNavItems];
   const navItem = allNavItems.find(item => item.key === currentSection.value);
@@ -845,6 +894,9 @@ const currentSectionInfo = computed(() => {
   if (currentSection.value === 'postDetail') {
     return { label: '摩文详情', icon: MessageCircle };
   }
+  if (currentSection.value === 'search') {
+    return { label: '搜索', icon: Search };
+  }
   
   return { label: '主页', icon: Home };
 });
@@ -853,7 +905,64 @@ const likedTimeline = computed(() => posts.value.filter((post) => likedPosts.val
 
 const bookmarkedTimeline = computed(() => posts.value.filter((post) => bookmarkedPosts.value[post.id]));
 
+function normalizeSearchText(raw: string) {
+  return String(raw || '').trim().toLowerCase();
+}
+
+const searchKeyword = computed(() => normalizeSearchText(searchQuery.value));
+
+const searchedUsers = computed(() => {
+  const q = searchKeyword.value;
+  if (!q) return [];
+  const userPool = [
+    ...people.value,
+    ...(currentUser.value ? [currentUser.value] : []),
+  ];
+  const uniq = new Map<string, SocialUser>();
+  userPool.forEach((user) => {
+    if (!user?.id || uniq.has(user.id)) return;
+    uniq.set(user.id, user);
+  });
+  return [...uniq.values()]
+    .filter((user) => [
+      user.displayName,
+      user.handle,
+      user.bio,
+      user.instance,
+      user.wallet,
+    ].join(' ').toLowerCase().includes(q))
+    .slice(0, 20);
+});
+
+const searchedPosts = computed(() => {
+  const q = searchKeyword.value;
+  if (!q) return [];
+  const postPool = [...posts.value, ...myPosts.value, ...newsTimeline.value];
+  const uniq = new Map<string, FeedCard>();
+  postPool.forEach((post) => {
+    if (!post?.id || uniq.has(post.id)) return;
+    uniq.set(post.id, post);
+  });
+  return [...uniq.values()]
+    .filter((post) => [
+      post.author,
+      post.handle,
+      post.instance,
+      post.bio,
+      post.content,
+      ...(post.tags || []),
+    ].join(' ').toLowerCase().includes(q))
+    .sort((a, b) => postCreatedAtTs(b) - postCreatedAtTs(a))
+    .slice(0, 30);
+});
+
 const notificationItems = computed(() => {
+  const feedById = new Map<string, FeedCard>();
+  [...posts.value, ...myPosts.value].forEach((post) => {
+    if (!feedById.has(post.id)) feedById.set(post.id, post);
+  });
+  const myPostIds = new Set(myPosts.value.map((post) => post.id));
+
   const mentionEvents = currentUser.value
     ? posts.value
         .filter((post) => post.authorId !== currentUser.value?.id)
@@ -861,11 +970,30 @@ const notificationItems = computed(() => {
         .slice(0, 5)
         .map((post) => ({
           id: `mention-${post.id}`,
+          kind: 'mention' as const,
           title: `${post.author} 提及了你`,
           body: post.content,
           time: post.time || '刚刚',
           sortAt: post.createdAt ? new Date(post.createdAt).getTime() : 0,
         }))
+    : [];
+
+  const replyEvents = currentUser.value
+    ? [...feedById.values()]
+      .filter((post) => post.authorId !== currentUser.value?.id)
+      .filter((post) => post.kind === 'reply' && Boolean(post.parentPostId) && myPostIds.has(String(post.parentPostId)))
+      .slice(0, 5)
+      .map((post) => {
+        const parent = post.parentPostId ? feedById.get(post.parentPostId) : null;
+        return {
+          id: `reply-${post.id}`,
+          kind: 'reply' as const,
+          title: `${post.author} 回复了你的帖子`,
+          body: parent ? `回复「${parent.content.slice(0, 32)}」：${post.content}` : post.content,
+          time: post.time || '刚刚',
+          sortAt: post.createdAt ? new Date(post.createdAt).getTime() : 0,
+        };
+      })
     : [];
 
   const postEvents = timeline.value
@@ -874,6 +1002,7 @@ const notificationItems = computed(() => {
     .slice(0, 2)
     .map((post) => ({
     id: `post-${post.id}`,
+    kind: 'system' as const,
     title: `${post.author} 发布了新内容`,
     body: post.content,
     time: post.time,
@@ -892,6 +1021,7 @@ const notificationItems = computed(() => {
       if (!latestPeerMessage) return [];
       return [{
         id: `message-${conversation.id}-${latestPeerMessage.id}`,
+        kind: 'directMessage' as const,
         title: `${conversation.name} 给你发了消息`,
         body: latestPeerMessage.forwardedPost
           ? forwardedSummaryText(latestPeerMessage.forwardedPost, 'peer')
@@ -905,6 +1035,7 @@ const notificationItems = computed(() => {
   const welcomeEvent = currentUser.value
     ? [{
         id: `welcome-${currentUser.value.id}`,
+        kind: 'system' as const,
         title: '欢迎来到鼹鼠社区',
         body: '这里是一个去中心化社区，你可以在这里畅所欲言',
         time: '刚刚',
@@ -912,11 +1043,34 @@ const notificationItems = computed(() => {
       }]
     : [];
 
-  return [...welcomeEvent, ...followerNotifications.value, ...messageEvents, ...mentionEvents, ...postEvents];
+  const digestEvent = notificationSettings.value.emailDigest
+    ? [{
+        id: 'digest-enabled',
+        kind: 'digest' as const,
+        title: '邮件摘要已开启',
+        body: '系统会每天向你的绑定邮箱发送活动摘要。',
+        time: '刚刚',
+        sortAt: Date.now(),
+      }]
+    : [];
+
+  const merged = [
+    ...welcomeEvent,
+    ...followerNotifications.value,
+    ...messageEvents,
+    ...mentionEvents,
+    ...replyEvents,
+    ...postEvents,
+    ...digestEvent,
+  ];
+
+  return merged.filter((item) => allowNotificationKind(item.kind));
 });
 
 const orderedNotificationItems = computed(() =>
-  [...notificationFeed.value].sort((a, b) => b.sortAt - a.sortAt),
+  [...notificationFeed.value]
+    .filter((item) => allowNotificationKind(item.kind))
+    .sort((a, b) => b.sortAt - a.sortAt),
 );
 
 function normalizeTopicTag(raw: string) {
@@ -1126,6 +1280,9 @@ function markConversationAsRead(conversationId: string) {
 // appearance watches removed
 
 function setSection(section: Section) {
+  if (section === 'notifications' || section === 'mentions') {
+    loadNotificationSettings();
+  }
   currentSection.value = section;
   // settings transition removed
   if (section !== 'postDetail') {
@@ -1229,6 +1386,124 @@ function messageReadAtStorageKey() {
   return userId ? `${MESSAGE_READ_AT_STORAGE_PREFIX}:${userId}` : '';
 }
 
+function encryptedMessageCacheStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${ENCRYPTED_MESSAGE_CACHE_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function messageDeviceIdStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${MESSAGE_DEVICE_ID_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function messageEncryptionKeyStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${MESSAGE_ENCRYPTION_KEY_STORAGE_PREFIX}:${userId}` : '';
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let raw = '';
+  bytes.forEach((v) => {
+    raw += String.fromCharCode(v);
+  });
+  return btoa(raw);
+}
+
+function base64ToBytes(base64: string) {
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+function randomBytes(length: number) {
+  if (typeof window === 'undefined') return new Uint8Array(length);
+  const bytes = new Uint8Array(length);
+  window.crypto.getRandomValues(bytes);
+  return bytes;
+}
+
+function getOrCreateMessageDeviceId() {
+  if (typeof window === 'undefined') return 'dev_unknown';
+  const key = messageDeviceIdStorageKey();
+  if (!key) return 'dev_unknown';
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+  const id = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  window.localStorage.setItem(key, id);
+  return id;
+}
+
+async function getOrCreateMessageCryptoKey() {
+  if (typeof window === 'undefined') return null;
+  const keyStorageKey = messageEncryptionKeyStorageKey();
+  if (!keyStorageKey) return null;
+  const rawExisting = window.localStorage.getItem(keyStorageKey);
+  if (rawExisting) {
+    const imported = await window.crypto.subtle.importKey(
+      'raw',
+      base64ToBytes(rawExisting),
+      'AES-GCM',
+      false,
+      ['encrypt', 'decrypt'],
+    );
+    return imported;
+  }
+  const generated = randomBytes(32);
+  window.localStorage.setItem(keyStorageKey, bytesToBase64(generated));
+  return window.crypto.subtle.importKey('raw', generated, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+function loadEncryptedMessageCache() {
+  if (typeof window === 'undefined') return {} as Record<string, EncryptedMessageCacheEntry>;
+  const key = encryptedMessageCacheStorageKey();
+  if (!key) return {} as Record<string, EncryptedMessageCacheEntry>;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {} as Record<string, EncryptedMessageCacheEntry>;
+    const parsed = JSON.parse(raw) as Record<string, EncryptedMessageCacheEntry>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {} as Record<string, EncryptedMessageCacheEntry>;
+  }
+}
+
+function persistEncryptedMessageCache(cache: Record<string, EncryptedMessageCacheEntry>) {
+  if (typeof window === 'undefined') return;
+  const key = encryptedMessageCacheStorageKey();
+  if (!key) return;
+  window.localStorage.setItem(key, JSON.stringify(cache));
+}
+
+async function cacheEncryptedConversationPayload(conversationId: string, messageBody: string) {
+  if (!conversationId) return;
+  if (typeof window === 'undefined') return;
+  const cryptoKey = await getOrCreateMessageCryptoKey();
+  if (!cryptoKey) return;
+  const iv = randomBytes(12);
+  const encoded = new TextEncoder().encode(messageBody);
+  const encrypted = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    cryptoKey,
+    encoded,
+  );
+  const encryptedBytes = new Uint8Array(encrypted);
+  const tagLength = 16;
+  const tag = encryptedBytes.slice(encryptedBytes.length - tagLength);
+  const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - tagLength);
+  const cache = loadEncryptedMessageCache();
+  cache[conversationId] = {
+    version: 1,
+    ciphertext: bytesToBase64(ciphertext),
+    iv: bytesToBase64(iv),
+    tag: bytesToBase64(tag),
+    algorithm: 'AES-256-GCM',
+    createdAt: Date.now(),
+    senderDeviceId: getOrCreateMessageDeviceId(),
+  };
+  persistEncryptedMessageCache(cache);
+}
+
 function followerSeenIdsStorageKey() {
   const userId = authSession.value?.id;
   return userId ? `${FOLLOWER_SEEN_IDS_STORAGE_PREFIX}:${userId}` : '';
@@ -1239,6 +1514,28 @@ const readMentionIds = ref<Record<string, boolean>>({});
 const readConversationAt = ref<Record<string, number>>({});
 const seenFollowerIds = ref<string[]>([]);
 const followerNotifications = ref<NotificationItem[]>([]);
+const notificationSettings = ref<NotificationSettings>({ ...defaultNotificationSettings });
+
+function loadNotificationSettings() {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      notificationSettings.value = { ...defaultNotificationSettings };
+      return;
+    }
+    const parsed = JSON.parse(raw) as Partial<NotificationSettings>;
+    notificationSettings.value = { ...defaultNotificationSettings, ...parsed };
+  } catch {
+    notificationSettings.value = { ...defaultNotificationSettings };
+  }
+}
+
+function handleStorageChange(event: StorageEvent) {
+  if (event.key === NOTIFICATION_SETTINGS_STORAGE_KEY) {
+    loadNotificationSettings();
+  }
+}
 
 function loadReadState() {
   if (typeof window === 'undefined') return;
@@ -1591,8 +1888,9 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
   const fallbackPeer = participantUsers.find((person) => person.id !== userId) ?? otherParticipants[0] ?? null;
   const displayParticipants = otherParticipants.length ? otherParticipants : fallbackPeer ? [fallbackPeer] : [];
 
+  const normalizedTitle = conversation.title.trim().replace(/^跨联邦[:：]\s*/u, '');
   const resolvedTitle =
-    conversation.title.trim() ||
+    normalizedTitle ||
     displayParticipants.map((person) => person.displayName).join('、') ||
     otherParticipantIds.join(', ') ||
     participantIds.join(', ') ||
@@ -1761,7 +2059,7 @@ async function startConversation(targetUser: SocialUser) {
     }
 
     const createdConversation = await createConversation({
-      title: isCrossInstanceUser(targetUser) ? `跨联邦：${targetUser.displayName}` : targetUser.displayName,
+      title: targetUser.displayName,
       participantIds: [targetUser.id],
       encrypted: false,
     });
@@ -1828,7 +2126,7 @@ async function loadMyFeed() {
     return;
   }
 
-  const payload = await fetchSocialBootstrapMine();
+  const payload = await fetchSocialBootstrapMine(DEFAULT_FEED_LIMIT);
   myPosts.value = payload.feed.map(toFeedCard);
 }
 
@@ -1971,12 +2269,8 @@ async function loadBootstrap() {
 
   loading.value = true;
   try {
-    const payload = await fetchSocialBootstrap();
+    const payload = await fetchSocialBootstrap(DEFAULT_FEED_LIMIT);
     applyBootstrap(payload);
-    await Promise.all([
-      loadMyFeed(),
-      loadLatestPostsTimeline(true),
-    ]);
     apiOnline.value = true;
     errorMessage.value = '';
   } catch (error) {
@@ -1988,6 +2282,14 @@ async function loadBootstrap() {
   } finally {
     loading.value = false;
   }
+}
+
+async function warmupHomeDataAfterFirstPaint() {
+  await nextTick();
+  await Promise.allSettled([
+    loadMyFeed(),
+    loadLatestPostsTimeline(true),
+  ]);
 }
 
 async function handleRouteMessageIntent() {
@@ -2087,8 +2389,8 @@ async function refreshHomeTimeline() {
       return;
     }
     const [payload, minePayload] = await Promise.all([
-      fetchSocialBootstrap(),
-      authSession.value ? fetchSocialBootstrapMine() : Promise.resolve(null),
+      fetchSocialBootstrap(DEFAULT_FEED_LIMIT),
+      authSession.value ? fetchSocialBootstrapMine(DEFAULT_FEED_LIMIT) : Promise.resolve(null),
     ]);
     applyBootstrap(payload);
     myPosts.value = minePayload ? minePayload.feed.map(toFeedCard) : [];
@@ -2334,6 +2636,7 @@ async function openRelationSection(type: 'followers' | 'following') {
 
 async function syncFollowerNotifications() {
   if (!currentUser.value?.id || !apiOnline.value) return;
+  if (!notificationSettings.value.follows || notificationSettings.value.quietHours) return;
   try {
     const followers = await fetchUserFollowers(currentUser.value.id, 200);
     const currentIds = new Set(followers.map((item) => item.id));
@@ -2344,6 +2647,7 @@ async function syncFollowerNotifications() {
       const now = Date.now();
       const newItems = newFollowers.map((item, idx) => ({
         id: `follow-${item.id}-${now}-${idx}`,
+        kind: 'follow' as const,
         title: `${item.displayName} 关注了你`,
         body: `${formatHandleInstance(item.handle, item.instance)} 刚刚关注了你`,
         time: '刚刚',
@@ -2751,6 +3055,7 @@ async function sendMessage() {
           sizeLabel: messageMediaMeta.value.sizeLabel || '',
         })
       : messageDraft.value.trim();
+    await cacheEncryptedConversationPayload(targetConversation.id, body);
 
     const updatedConversation = await createConversationMessage(targetConversation.id, {
       senderId: currentUser.value.id,
@@ -2899,9 +3204,11 @@ async function forwardPostToConversation() {
   if (!forwardingPost.value || !forwardingConversationId.value || !currentUser.value || forwarding.value) return;
   forwarding.value = true;
   try {
+    const body = toForwardedPostBody(forwardingPost.value);
+    await cacheEncryptedConversationPayload(forwardingConversationId.value, body);
     const updatedConversation = await createConversationMessage(forwardingConversationId.value, {
       senderId: currentUser.value.id,
-      body: toForwardedPostBody(forwardingPost.value),
+      body,
     });
     const mapped = toConversationCard(updatedConversation, currentUser.value?.id ?? null);
     upsertConversation(mapped);
@@ -2921,8 +3228,10 @@ async function forwardPostToConversation() {
 }
 
 onMounted(() => {
+  loadNotificationSettings();
   void (async () => {
     await loadBootstrap();
+    void warmupHomeDataAfterFirstPaint();
     await handleRouteMessageIntent();
   })();
   loadPostingPrivacySettings();
@@ -2931,6 +3240,7 @@ onMounted(() => {
   loadReadState();
   document.addEventListener('click', handleDocumentClick);
   document.addEventListener('visibilitychange', handleVisibilityChange);
+  window.addEventListener('storage', handleStorageChange);
   window.addEventListener('resize', updateEmojiPickerFloatingPosition);
   window.addEventListener('scroll', updateEmojiPickerFloatingPosition, true);
   startInstancePolling();
@@ -2964,6 +3274,7 @@ watch(
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
   document.removeEventListener('visibilitychange', handleVisibilityChange);
+  window.removeEventListener('storage', handleStorageChange);
   window.removeEventListener('resize', updateEmojiPickerFloatingPosition);
   window.removeEventListener('scroll', updateEmojiPickerFloatingPosition, true);
   stopInstancePolling();
@@ -3036,6 +3347,20 @@ watch(
   () => {
     notificationFeed.value = [];
     syncNotificationFeed();
+  },
+);
+
+watch(
+  () => searchQuery.value,
+  (value) => {
+    const hasQuery = Boolean(value.trim());
+    if (hasQuery) {
+      currentSection.value = 'search';
+      return;
+    }
+    if (currentSection.value === 'search') {
+      currentSection.value = 'home';
+    }
   },
 );
 </script>
@@ -3470,6 +3795,68 @@ watch(
                 </div>
               </div>
             </article>
+          </section>
+
+          <section v-else-if="currentSection === 'search'" class="divide-y divide-[color:var(--border-color)]">
+            <div class="px-6 py-4">
+              <div class="text-xs uppercase tracking-wider text-[color:var(--text-muted)]">关键词</div>
+              <div class="mt-1 text-lg font-semibold text-[color:var(--text-primary)]">{{ searchQuery }}</div>
+            </div>
+
+            <div class="px-6 py-4">
+              <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">用户</div>
+              <div v-if="searchedUsers.length === 0" class="rounded-xl border border-dashed border-[color:var(--border-color)] px-4 py-6 text-sm text-[color:var(--text-muted)]">
+                没有匹配到相关用户
+              </div>
+              <div v-else class="space-y-3">
+                <button
+                  v-for="user in searchedUsers"
+                  :key="user.id"
+                  @click="goToUserProfile(user.id)"
+                  class="flex w-full items-center gap-3 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-3 py-3 text-left transition hover:border-emerald-500/35 hover:bg-emerald-500/5"
+                >
+                  <div class="flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-lime-200 to-cyan-200 font-bold text-slate-900">
+                    <img v-if="user.avatarUrl" :src="user.avatarUrl" class="h-full w-full object-cover" />
+                    <template v-else>{{ avatarText(user.displayName) }}</template>
+                  </div>
+                  <div class="min-w-0">
+                    <div class="truncate font-semibold text-[color:var(--text-primary)]">{{ user.displayName }}</div>
+                    <div class="truncate text-xs text-[color:var(--text-muted)]">{{ formatHandleInstance(user.handle, user.instance) }}</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            <div class="px-6 py-4">
+              <div class="mb-3 text-sm font-semibold text-[color:var(--text-primary)]">帖子</div>
+              <div v-if="searchedPosts.length === 0" class="rounded-xl border border-dashed border-[color:var(--border-color)] px-4 py-6 text-sm text-[color:var(--text-muted)]">
+                没有匹配到相关帖子
+              </div>
+              <div v-else class="space-y-3">
+                <button
+                  v-for="post in searchedPosts"
+                  :key="post.id"
+                  @click="openPostDetail(post.id, false)"
+                  class="w-full rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] px-4 py-3 text-left transition hover:border-emerald-500/35 hover:bg-emerald-500/5"
+                >
+                  <div class="flex items-center gap-2 text-xs text-[color:var(--text-muted)]">
+                    <span class="font-semibold text-[color:var(--text-primary)]">{{ post.author }}</span>
+                    <span>{{ formatHandleInstance(post.handle, post.instance) }}</span>
+                    <span>{{ post.time }}</span>
+                  </div>
+                  <div class="mt-2 max-h-[5.5rem] overflow-hidden whitespace-pre-wrap text-sm leading-6 text-[color:var(--text-soft)]">{{ post.content }}</div>
+                  <div v-if="post.tags.length" class="mt-2 flex flex-wrap gap-1.5">
+                    <span
+                      v-for="tag in post.tags.slice(0, 4)"
+                      :key="`${post.id}-${tag}`"
+                      class="rounded-full bg-emerald-500/12 px-2 py-0.5 text-[11px] text-emerald-300"
+                    >
+                      #{{ tag }}
+                    </span>
+                  </div>
+                </button>
+              </div>
+            </div>
           </section>
 
           <section v-else-if="currentSection === 'postDetail'" class="min-h-[calc(100vh-140px)]">
