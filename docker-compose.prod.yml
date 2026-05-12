@@ -24,6 +24,17 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_SOCIAL_API_URL: https://molesociety.longyinstudio.cn/api/v1
+    container_name: molesociety-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
 
   backend:
     build:
