@@ -3,11 +3,15 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Bookmark, ChevronLeft, Heart, MessageCircle, MoreHorizontal, Repeat } from 'lucide-vue-next';
 import {
+  bookmarkPost,
   fetchSocialBootstrap,
   fetchUser,
   fetchUserFollowers,
   fetchUserFollowing,
   followUser,
+  likePost,
+  unlikePost,
+  unbookmarkPost,
   unfollowUser,
   type SocialPost,
   type SocialUser,
@@ -27,11 +31,11 @@ const posts = ref<SocialPost[]>([]);
 const following = ref(false);
 const followedUsers = ref<Record<string, boolean>>({});
 const followLoading = ref(false);
-const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
-const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
 const likedPosts = ref<Record<string, boolean>>({});
 const bookmarkedPosts = ref<Record<string, boolean>>({});
 const followActionLoading = ref<Record<string, boolean>>({});
+const likeActionLoading = ref<Record<string, boolean>>({});
+const bookmarkActionLoading = ref<Record<string, boolean>>({});
 const relationView = ref<'posts' | 'followers' | 'following'>('posts');
 const relationUsers = ref<SocialUser[]>([]);
 const relationLoading = ref(false);
@@ -116,6 +120,14 @@ async function loadProfile() {
     const profile = await fetchUser(targetUserId);
     user.value = profile;
     posts.value = bootstrap.feed.filter((post) => post.authorId === profile.id);
+    const nextLiked: Record<string, boolean> = {};
+    const nextBookmarked: Record<string, boolean> = {};
+    posts.value.forEach((post) => {
+      nextLiked[post.id] = Boolean(post.liked);
+      nextBookmarked[post.id] = Boolean(post.bookmarked);
+    });
+    likedPosts.value = nextLiked;
+    bookmarkedPosts.value = nextBookmarked;
     await syncFollowingState();
     const canonicalHandle = String(profile.handle || '').replace(/^@/, '');
     if (canonicalHandle && normalizedKey !== canonicalHandle) {
@@ -168,58 +180,51 @@ async function syncFollowingState() {
   }
 }
 
-function likeStorageKey() {
-  const userId = currentUser.value?.id;
-  return userId ? `${LIKE_STORAGE_PREFIX}:${userId}` : '';
-}
-
-function bookmarkStorageKey() {
-  const userId = currentUser.value?.id;
-  return userId ? `${BOOKMARK_STORAGE_PREFIX}:${userId}` : '';
-}
-
 function loadInteractionState() {
-  if (typeof window === 'undefined') return;
-  const likeKey = likeStorageKey();
-  const bookmarkKey = bookmarkStorageKey();
   likedPosts.value = {};
   bookmarkedPosts.value = {};
-  if (likeKey) {
-    try {
-      likedPosts.value = JSON.parse(window.localStorage.getItem(likeKey) || '{}');
-    } catch {
-      likedPosts.value = {};
-    }
-  }
-  if (bookmarkKey) {
-    try {
-      bookmarkedPosts.value = JSON.parse(window.localStorage.getItem(bookmarkKey) || '{}');
-    } catch {
-      bookmarkedPosts.value = {};
-    }
+}
+
+function applyUpdatedPost(updated: SocialPost) {
+  posts.value = posts.value.map((post) => (post.id === updated.id ? updated : post));
+  likedPosts.value = { ...likedPosts.value, [updated.id]: Boolean(updated.liked) };
+  bookmarkedPosts.value = { ...bookmarkedPosts.value, [updated.id]: Boolean(updated.bookmarked) };
+}
+
+async function toggleLike(postId: string) {
+  if (!postId || likeActionLoading.value[postId]) return;
+  const previous = Boolean(likedPosts.value[postId]);
+  const next = !previous;
+  likeActionLoading.value = { ...likeActionLoading.value, [postId]: true };
+  likedPosts.value = { ...likedPosts.value, [postId]: next };
+  posts.value = posts.value.map((post) => (post.id === postId ? { ...post, likes: Math.max(0, Number(post.likes || 0) + (next ? 1 : -1)) } : post));
+  try {
+    const updated = next ? await likePost(postId) : await unlikePost(postId);
+    applyUpdatedPost(updated);
+  } catch {
+    likedPosts.value = { ...likedPosts.value, [postId]: previous };
+    posts.value = posts.value.map((post) => (post.id === postId ? { ...post, likes: Math.max(0, Number(post.likes || 0) + (previous ? 1 : -1)) } : post));
+  } finally {
+    likeActionLoading.value = { ...likeActionLoading.value, [postId]: false };
   }
 }
 
-function persistInteractionState() {
-  if (typeof window === 'undefined') return;
-  const likeKey = likeStorageKey();
-  const bookmarkKey = bookmarkStorageKey();
-  if (likeKey) {
-    window.localStorage.setItem(likeKey, JSON.stringify(likedPosts.value));
+async function toggleBookmark(postId: string) {
+  if (!postId || bookmarkActionLoading.value[postId]) return;
+  const previous = Boolean(bookmarkedPosts.value[postId]);
+  const next = !previous;
+  bookmarkActionLoading.value = { ...bookmarkActionLoading.value, [postId]: true };
+  bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: next };
+  posts.value = posts.value.map((post) => (post.id === postId ? { ...post, bookmarks: Math.max(0, Number(post.bookmarks || 0) + (next ? 1 : -1)) } : post));
+  try {
+    const updated = next ? await bookmarkPost(postId) : await unbookmarkPost(postId);
+    applyUpdatedPost(updated);
+  } catch {
+    bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: previous };
+    posts.value = posts.value.map((post) => (post.id === postId ? { ...post, bookmarks: Math.max(0, Number(post.bookmarks || 0) + (previous ? 1 : -1)) } : post));
+  } finally {
+    bookmarkActionLoading.value = { ...bookmarkActionLoading.value, [postId]: false };
   }
-  if (bookmarkKey) {
-    window.localStorage.setItem(bookmarkKey, JSON.stringify(bookmarkedPosts.value));
-  }
-}
-
-function toggleLike(postId: string) {
-  likedPosts.value = { ...likedPosts.value, [postId]: !likedPosts.value[postId] };
-  persistInteractionState();
-}
-
-function toggleBookmark(postId: string) {
-  bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: !bookmarkedPosts.value[postId] };
-  persistInteractionState();
 }
 
 function openPostDetail(postId: string) {
@@ -496,7 +501,7 @@ watch(
                     class="inline-flex items-center rounded-[2rem] border px-3 py-1.5 text-sm font-medium transition-all hover:-translate-y-0.5 hover:shadow-sm"
                     :class="likedPosts[post.id] ? 'border-rose-400/40 bg-rose-500/10 text-rose-300' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-rose-300/30 hover:text-rose-200'"
                   >
-                    <Heart :class="{ 'fill-current': likedPosts[post.id] }" class="mr-1.5 h-[18px] w-[18px]" /> {{ post.likes + (likedPosts[post.id] ? 1 : 0) || '' }}
+                    <Heart :class="{ 'fill-current': likedPosts[post.id] }" class="mr-1.5 h-[18px] w-[18px]" /> {{ Number(post.likes || 0) }}
                   </button>
                   <button
                     @click="toggleBookmark(post.id)"
@@ -504,6 +509,7 @@ watch(
                     :class="bookmarkedPosts[post.id] ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : 'border-[color:var(--border-color)] text-[color:var(--text-secondary)] hover:border-emerald-300/30 hover:text-emerald-200'"
                   >
                     <Bookmark :class="{ 'fill-current': bookmarkedPosts[post.id] }" class="mr-1.5 h-[18px] w-[18px]" />
+                    {{ Number(post.bookmarks || 0) }}
                   </button>
                   <div class="relative ml-auto">
                     <button

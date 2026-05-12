@@ -2022,9 +2022,12 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
   const normalizedTitle = conversation.title
     .trim()
     .replace(/^跨联邦(?:会话)?\s*[-:：]?\s*/u, '');
+  const participantDisplayName = displayParticipants.map((person) => person.displayName).join('、');
+  const isDirectConversation = participantIds.length <= 2 && otherParticipantIds.length <= 1;
   const resolvedTitle =
+    (isDirectConversation ? participantDisplayName : normalizedTitle) ||
+    participantDisplayName ||
     normalizedTitle ||
-    displayParticipants.map((person) => person.displayName).join('、') ||
     otherParticipantIds.join(', ') ||
     participantIds.join(', ') ||
     '新会话';
@@ -2067,7 +2070,7 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
       from,
       text: forwardedPost
         ? forwardedSummaryText(forwardedPost, from)
-        : (imageEmoji?.text || (imageEmoji ? '[图片表情]' : message.body)),
+        : (imageEmoji?.text || (imageEmoji ? '' : message.body)),
       imageEmoji: imageEmoji?.media || null,
       forwardedPost,
       time: formatTimestamp(message.createdAt),
@@ -2760,6 +2763,13 @@ function applyFollowStatsDelta(userId: string, followed: boolean) {
     };
   }
   people.value = people.value.map((person) => {
+    if (person.id !== userId) return person;
+    return {
+      ...person,
+      followers: Math.max(0, (person.followers || 0) + delta),
+    };
+  });
+  exploreUsers.value = exploreUsers.value.map((person) => {
     if (person.id !== userId) return person;
     return {
       ...person,
@@ -4716,7 +4726,8 @@ function triggerSearchFromInput() {
                   <div class="flex items-start justify-between gap-4">
                     <div class="flex min-w-0 gap-4">
                       <div class="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-lime-200 to-cyan-200 text-lg font-bold text-slate-900">
-                        {{ avatarText(person.displayName) }}
+                        <img v-if="person.avatarUrl" :src="person.avatarUrl" :alt="person.displayName" class="h-full w-full object-cover" />
+                        <template v-else>{{ avatarText(person.displayName) }}</template>
                       </div>
                       <div class="min-w-0">
                         <div class="flex flex-wrap items-center gap-2">
