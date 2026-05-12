@@ -2889,7 +2889,7 @@ class SocialService {
   }
 
   private String measuredInstanceLatency(String instanceName) {
-    if ("摩尔2号".equals(instanceName) || "摩尔3号".equals(instanceName)) {
+    if (primaryMoleInstanceName().equals(instanceName) || "摩尔2号".equals(instanceName) || "摩尔3号".equals(instanceName)) {
       int mockLatency = ThreadLocalRandom.current().nextInt(0, 201);
       return mockLatency + " ms";
     }
