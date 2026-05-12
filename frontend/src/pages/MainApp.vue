@@ -2626,11 +2626,32 @@ function clearReplyMedia() {
   replyMediaMeta.value = null;
 }
 
-function toggleFollow(userId: string) {
-  followedUsers.value = {
-    ...followedUsers.value,
-    [userId]: !followedUsers.value[userId],
-  };
+function applyFollowStatsDelta(userId: string, followed: boolean) {
+  const delta = followed ? 1 : -1;
+  if (currentUser.value) {
+    currentUser.value = {
+      ...currentUser.value,
+      following: Math.max(0, (currentUser.value.following || 0) + delta),
+    };
+  }
+  people.value = people.value.map((person) => {
+    if (person.id !== userId) return person;
+    return {
+      ...person,
+      followers: Math.max(0, (person.followers || 0) + delta),
+    };
+  });
+  relationUsers.value = relationUsers.value.map((person) => {
+    if (person.id !== userId) return person;
+    return {
+      ...person,
+      followers: Math.max(0, (person.followers || 0) + delta),
+    };
+  });
+}
+
+async function toggleFollow(userId: string) {
+  await toggleFollowRelationUser(userId);
 }
 
 async function loadRelationUsers(type: 'followers' | 'following') {
@@ -2701,6 +2722,7 @@ async function toggleFollowRelationUser(userId: string) {
       await unfollowUser(userId);
     }
     followedUsers.value = { ...followedUsers.value, [userId]: next };
+    applyFollowStatsDelta(userId, next);
   } finally {
     followActionLoading.value = { ...followActionLoading.value, [userId]: false };
   }
@@ -4589,9 +4611,10 @@ function triggerSearchFromInput() {
                       </button>
                       <button
                         @click.stop="toggleFollow(person.id)"
-                        class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold tracking-wide text-white shadow-sm transition hover:bg-emerald-500 hover:shadow-emerald-500/25"
+                        :disabled="followActionLoading[person.id]"
+                        class="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold tracking-wide text-white shadow-sm transition hover:bg-emerald-500 hover:shadow-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {{ followedUsers[person.id] ? '已关注' : '关注' }}
+                        {{ followActionLoading[person.id] ? '处理中...' : (followedUsers[person.id] ? '已关注' : '关注') }}
                       </button>
                     </div>
                   </div>
