@@ -611,6 +611,7 @@ const homeTimeline = computed(() => {
 });
 
 async function selectInstance(name: string) {
+  const previousInstance = selectedInstanceName.value;
   selectedInstanceName.value = name;
   if (name === 'all') return;
   if (!currentUser.value) return;
@@ -620,13 +621,26 @@ async function selectInstance(name: string) {
   }
 
   try {
+    // Optimistic update: immediately reflect instance switch in local UI.
+    currentUser.value = { ...currentUser.value, instance: name };
+    people.value = people.value.map((person) =>
+      person.id === currentUser.value?.id ? { ...person, instance: name } : person,
+    );
+    applyInstanceMemberSwitch(previousInstance, name);
+    refreshConversationFederationRoutes();
+
     const updatedUser = await updateUserProfile(currentUser.value.id, { instance: name });
     currentUser.value = updatedUser;
     people.value = people.value.map((person) => (person.id === updatedUser.id ? updatedUser : person));
-    const payload = await fetchSocialBootstrap();
-    applyBootstrap(payload);
+    refreshConversationFederationRoutes();
     apiOnline.value = true;
+    // Silent refresh in background, do not block the interaction.
+    void fetchSocialBootstrap()
+      .then((payload) => applyBootstrap(payload))
+      .catch(() => {});
   } catch (error) {
+    // rollback optimistic selection
+    selectedInstanceName.value = previousInstance;
     if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
       void router.push({ path: '/login', query: { redirect: '/app' } });
       return;
@@ -825,9 +839,79 @@ const visibleInstances = computed(() => {
   return (Array.isArray(instances.value) ? instances.value : []).map((item) => ({
     ...item,
     members: String(item.members || '0 人在线'),
-    latency: String(item.latency || '未探测'),
+    latency: String(clientLatencyByInstance.value[item.name] || item.latency || '未探测'),
   }));
 });
+
+const clientLatencyByInstance = ref<Record<string, string>>({});
+const measuringInstanceLatency = ref(false);
+
+function instanceProbeURL(name: string) {
+  if (name === '摩尔1号') return 'https://molesociety.longyinstudio.cn/healthz';
+  if (name === '摩尔2号') return 'https://dev.longyinstudio.cn/healthz';
+  if (name === '摩尔3号') return 'https://dev.longyinstudio.cn/healthz';
+  return '';
+}
+
+async function measureOneLatency(url: string) {
+  if (!url) return '未探测';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3000);
+  const started = performance.now();
+  try {
+    await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      mode: 'cors',
+      signal: ctrl.signal,
+    });
+    const elapsed = Math.max(1, Math.round(performance.now() - started));
+    return `${elapsed} ms`;
+  } catch {
+    return '不可达';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function membersCountOf(value: string) {
+  const match = String(value || '').match(/(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
+function withMembersCount(instance: FederationInstance, count: number): FederationInstance {
+  return {
+    ...instance,
+    members: `${Math.max(0, count)} 人在线`,
+  };
+}
+
+function applyInstanceMemberSwitch(fromName: string, toName: string) {
+  if (!fromName || !toName || fromName === toName) return;
+  instances.value = instances.value.map((item) => {
+    if (item.name === fromName) {
+      return withMembersCount(item, membersCountOf(item.members) - 1);
+    }
+    if (item.name === toName) {
+      return withMembersCount(item, membersCountOf(item.members) + 1);
+    }
+    return item;
+  });
+}
+
+async function measureClientInstanceLatency() {
+  if (measuringInstanceLatency.value) return;
+  measuringInstanceLatency.value = true;
+  try {
+    const next: Record<string, string> = {};
+    for (const item of instances.value) {
+      next[item.name] = await measureOneLatency(instanceProbeURL(item.name));
+    }
+    clientLatencyByInstance.value = next;
+  } finally {
+    measuringInstanceLatency.value = false;
+  }
+}
 
 const topicTimeline = computed(() => {
   const tag = normalizeTopicTag(selectedTopicTag.value);
@@ -1403,13 +1487,20 @@ function toConversationCard(conversation: SocialConversation, userId: string | n
     otherParticipantIds.join(', ') ||
     participantIds.join(', ');
 
+  const selfUser = userId ? (people.value.find((person) => person.id === userId) || currentUser.value) : currentUser.value;
+  const selfInstance = String(selfUser?.instance || '').trim();
+  const peerInstance = String(fallbackPeer?.instance || '').trim();
+  const resolvedRoute = conversation.crossInstance
+    ? (selfInstance && peerInstance ? `${selfInstance} → ${peerInstance}` : (conversation.federationRoute || ''))
+    : '';
+
   return {
     id: conversation.id,
     name: resolvedTitle,
     handle: resolvedHandle,
     status: conversation.crossInstance ? '跨联邦会话' : conversation.encrypted ? '端到端加密会话' : '同实例会话',
     crossInstance: Boolean(conversation.crossInstance),
-    federationRoute: conversation.federationRoute || '',
+    federationRoute: resolvedRoute,
     assetUri: conversation.assetUri,
     chainId: conversation.chainId,
     txHash: conversation.txHash,
@@ -2290,6 +2381,23 @@ function updateEmojiPickerFloatingPosition() {
   };
 }
 
+function refreshConversationFederationRoutes() {
+  const selfInstance = String(currentUser.value?.instance || '').trim();
+  if (!selfInstance) return;
+  conversations.value = conversations.value.map((conversation) => {
+    if (!conversation.crossInstance) return conversation;
+    const peer = conversation.participantId
+      ? people.value.find((person) => person.id === conversation.participantId)
+      : null;
+    const peerInstance = String(peer?.instance || '').trim();
+    if (!peerInstance) return conversation;
+    return {
+      ...conversation,
+      federationRoute: `${selfInstance} → ${peerInstance}`,
+    };
+  });
+}
+
 async function insertEmojiAtCursor(emoji: string) {
   if (!emoji) return;
 
@@ -2542,6 +2650,15 @@ onMounted(() => {
   window.addEventListener('resize', updateEmojiPickerFloatingPosition);
   window.addEventListener('scroll', updateEmojiPickerFloatingPosition, true);
 });
+
+watch(
+  [() => currentSection.value, () => instances.value.map((item) => item.name).join('|')],
+  async ([section]) => {
+    if (section !== 'lists') return;
+    await measureClientInstanceLatency();
+  },
+  { immediate: true },
+);
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
