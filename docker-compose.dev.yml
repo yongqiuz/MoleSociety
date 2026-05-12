@@ -40,6 +40,7 @@ services:
       SERVER_PORT: 8080
       DATABASE_URL: postgres://molesociety:${POSTGRES_PASSWORD}@postgres:5432/molesociety_dev?sslmode=disable
       REDIS_ADDR: redis:6379
+      INSTANCE_PROBE_URLS: ${INSTANCE_PROBE_URLS}
       DB_MIGRATIONS_DIR: ./migrations
       SOCIAL_SEED: "0"
       NEWS_AUTO_ENABLED: ${NEWS_AUTO_ENABLED:-1}
