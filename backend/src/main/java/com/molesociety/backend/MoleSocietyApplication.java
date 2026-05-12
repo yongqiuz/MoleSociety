@@ -2577,17 +2577,9 @@ class SocialService {
 
   private List<FederationInstance> liveInstances() {
     Map<String, Integer> onlineByInstance = activeSessions.countOnlineByInstance(users);
-    Map<String, Integer> usersByInstance = new HashMap<>();
-    for (SocialUser user : users) {
-      if (!Strings.hasText(user.instance)) continue;
-      usersByInstance.merge(user.instance, 1, Integer::sum);
-    }
     List<FederationInstance> result = new ArrayList<>();
     for (FederationInstance item : instances) {
       int online = onlineByInstance.getOrDefault(item.name, 0);
-      if (online <= 0) {
-        online = Math.max(0, usersByInstance.getOrDefault(item.name, 0));
-      }
       long postCount = posts.stream().filter(post -> item.name.equals(post.instance)).count();
       String members = online + " 人在线";
       String measuredLatency = measuredInstanceLatency(item.name);
