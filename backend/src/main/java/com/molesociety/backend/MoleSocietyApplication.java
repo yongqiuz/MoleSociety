@@ -436,7 +436,7 @@ class SocialController {
   ResponseEntity<ApiResponse<SocialPost>> post(@PathVariable String id, HttpServletRequest request) {
     try {
       String userID = auth.userFromRequest(request).map(u -> u.id).orElse("");
-      return ApiResponse.ok(social.getPost(id, userID));
+      return ApiResponse.ok(social.getPostView(id, userID));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -494,6 +494,24 @@ class SocialController {
   ResponseEntity<ApiResponse<SocialPost>> unbookmark(@PathVariable String id, HttpServletRequest request) {
     try {
       return ApiResponse.ok(social.unbookmarkPost(id, requiredUser(request).id));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @PostMapping("/posts/{id}/like")
+  ResponseEntity<ApiResponse<SocialPost>> like(@PathVariable String id, HttpServletRequest request) {
+    try {
+      return ApiResponse.ok(social.likePost(id, requiredUser(request).id));
+    } catch (ApiException err) {
+      return err.toResponse();
+    }
+  }
+
+  @DeleteMapping("/posts/{id}/like")
+  ResponseEntity<ApiResponse<SocialPost>> unlike(@PathVariable String id, HttpServletRequest request) {
+    try {
+      return ApiResponse.ok(social.unlikePost(id, requiredUser(request).id));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -693,6 +711,7 @@ class PersistenceService {
           st.executeUpdate("DELETE FROM conversation_participants");
           st.executeUpdate("DELETE FROM conversations");
           st.executeUpdate("DELETE FROM post_media_links");
+          st.executeUpdate("DELETE FROM post_likes");
           st.executeUpdate("DELETE FROM post_bookmarks");
           st.executeUpdate("DELETE FROM social_posts");
           st.executeUpdate("DELETE FROM media_assets");
@@ -709,6 +728,9 @@ class PersistenceService {
       for (Conversation conversation : state.conversations) saveConversation(conversation);
       for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
         for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
+      }
+      for (Map.Entry<String, Set<String>> entry : state.likes.entrySet()) {
+        for (String postID : entry.getValue()) saveLike(entry.getKey(), postID);
       }
       for (Map.Entry<String, Set<String>> entry : state.bookmarks.entrySet()) {
         for (String postID : entry.getValue()) saveBookmark(entry.getKey(), postID);
@@ -731,6 +753,9 @@ class PersistenceService {
       for (Conversation conversation : state.conversations) saveConversation(conversation);
       for (Map.Entry<String, Set<String>> entry : state.follows.entrySet()) {
         for (String target : entry.getValue()) saveFollow(entry.getKey(), target);
+      }
+      for (Map.Entry<String, Set<String>> entry : state.likes.entrySet()) {
+        for (String postID : entry.getValue()) saveLike(entry.getKey(), postID);
       }
       for (Map.Entry<String, Set<String>> entry : state.bookmarks.entrySet()) {
         for (String postID : entry.getValue()) saveBookmark(entry.getKey(), postID);
@@ -766,6 +791,7 @@ class PersistenceService {
     setJson("social:snapshot:conversations", state.conversations, 0);
     setJson("social:snapshot:instances", state.instances, 0);
     setJson("social:snapshot:follows", state.follows, 0);
+    setJson("social:snapshot:likes", state.likes, 0);
     setJson("social:snapshot:bookmarks", state.bookmarks, 0);
   }
 
@@ -779,6 +805,10 @@ class PersistenceService {
       state.conversations.addAll(readJson("social:snapshot:conversations", new TypeReference<List<Conversation>>() {}));
       state.instances.addAll(readJson("social:snapshot:instances", new TypeReference<List<FederationInstance>>() {}));
       state.follows.putAll(readJson("social:snapshot:follows", new TypeReference<Map<String, Set<String>>>() {}));
+      try {
+        state.likes.putAll(readJson("social:snapshot:likes", new TypeReference<Map<String, Set<String>>>() {}));
+      } catch (RuntimeException ignored) {
+      }
       try {
         state.bookmarks.putAll(readJson("social:snapshot:bookmarks", new TypeReference<Map<String, Set<String>>>() {}));
       } catch (RuntimeException ignored) {
@@ -1059,6 +1089,28 @@ class PersistenceService {
     });
   }
 
+  void saveLike(String userID, String postID) {
+    if (!databaseAvailable) return;
+    exec(conn -> {
+      try (PreparedStatement ps = conn.prepareStatement("INSERT INTO post_likes(user_id, post_id) VALUES (?,?) ON CONFLICT DO NOTHING")) {
+        ps.setString(1, userID);
+        ps.setString(2, postID);
+        ps.executeUpdate();
+      }
+    });
+  }
+
+  void deleteLike(String userID, String postID) {
+    if (!databaseAvailable) return;
+    exec(conn -> {
+      try (PreparedStatement ps = conn.prepareStatement("DELETE FROM post_likes WHERE user_id=? AND post_id=?")) {
+        ps.setString(1, userID);
+        ps.setString(2, postID);
+        ps.executeUpdate();
+      }
+    });
+  }
+
   void deleteBookmark(String userID, String postID) {
     if (!databaseAvailable) return;
     exec(conn -> {
@@ -1209,6 +1261,7 @@ class PersistenceService {
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS explorer_url TEXT NOT NULL DEFAULT ''");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS poll_json JSONB");
       st.executeUpdate("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS bookmark_count INTEGER NOT NULL DEFAULT 0");
+      st.executeUpdate("CREATE TABLE IF NOT EXISTS post_likes (user_id TEXT NOT NULL REFERENCES social_users(id) ON DELETE CASCADE, post_id TEXT NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE, PRIMARY KEY (user_id, post_id))");
       st.executeUpdate("CREATE TABLE IF NOT EXISTS post_bookmarks (user_id TEXT NOT NULL REFERENCES social_users(id) ON DELETE CASCADE, post_id TEXT NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE, PRIMARY KEY (user_id, post_id))");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS fields_json JSONB NOT NULL DEFAULT '[]'::jsonb");
       st.executeUpdate("ALTER TABLE social_users ADD COLUMN IF NOT EXISTS featured_tags_json JSONB NOT NULL DEFAULT '[]'::jsonb");
@@ -1309,6 +1362,10 @@ class PersistenceService {
       try (PreparedStatement ps = conn.prepareStatement("SELECT follower_id, followee_id FROM user_follows")) {
         ResultSet rs = ps.executeQuery();
         while (rs.next()) state.follows.computeIfAbsent(rs.getString(1), key -> new HashSet<>()).add(rs.getString(2));
+      }
+      try (PreparedStatement ps = conn.prepareStatement("SELECT user_id, post_id FROM post_likes")) {
+        ResultSet rs = ps.executeQuery();
+        while (rs.next()) state.likes.computeIfAbsent(rs.getString(1), key -> new HashSet<>()).add(rs.getString(2));
       }
       try (PreparedStatement ps = conn.prepareStatement("SELECT user_id, post_id FROM post_bookmarks")) {
         ResultSet rs = ps.executeQuery();
@@ -1501,6 +1558,7 @@ class SocialState {
   public List<Conversation> conversations = new ArrayList<>();
   public List<FederationInstance> instances = new ArrayList<>();
   public Map<String, Set<String>> follows = new HashMap<>();
+  public Map<String, Set<String>> likes = new HashMap<>();
   public Map<String, Set<String>> bookmarks = new HashMap<>();
 }
 
@@ -1965,6 +2023,7 @@ class SocialService {
   private final List<Conversation> conversations = new ArrayList<>();
   private final List<FederationInstance> instances = new ArrayList<>();
   private final Map<String, Set<String>> follows = new HashMap<>();
+  private final Map<String, Set<String>> likes = new HashMap<>();
   private final Map<String, Set<String>> bookmarks = new HashMap<>();
   private final Set<String> seenNewsFingerprints = new LinkedHashSet<>();
 
@@ -2016,6 +2075,7 @@ class SocialService {
     conversations.clear();
     instances.clear();
     follows.clear();
+    likes.clear();
     bookmarks.clear();
     if (seed) {
       seed();
@@ -2031,6 +2091,7 @@ class SocialService {
     conversations.clear();
     instances.clear();
     follows.clear();
+    likes.clear();
     bookmarks.clear();
     users.addAll(state.users);
     posts.addAll(state.posts);
@@ -2038,6 +2099,7 @@ class SocialService {
     conversations.addAll(state.conversations);
     instances.addAll(state.instances);
     follows.putAll(state.follows);
+    likes.putAll(state.likes);
     bookmarks.putAll(state.bookmarks);
     ensureChainAssets();
     refreshPostCounts();
@@ -2053,6 +2115,9 @@ class SocialService {
     state.instances.addAll(instances);
     for (Map.Entry<String, Set<String>> entry : follows.entrySet()) {
       state.follows.put(entry.getKey(), new HashSet<>(entry.getValue()));
+    }
+    for (Map.Entry<String, Set<String>> entry : likes.entrySet()) {
+      state.likes.put(entry.getKey(), new HashSet<>(entry.getValue()));
     }
     for (Map.Entry<String, Set<String>> entry : bookmarks.entrySet()) {
       state.bookmarks.put(entry.getKey(), new HashSet<>(entry.getValue()));
@@ -2161,7 +2226,7 @@ class SocialService {
     persistence.saveBookmark(userID, post.id);
     persistence.savePost(post);
     persistence.saveSocialSnapshot(snapshot());
-    return post;
+    return toUserView(post, userID);
   }
 
   synchronized SocialPost unbookmarkPost(String postID, String userID) {
@@ -2173,7 +2238,36 @@ class SocialService {
     persistence.deleteBookmark(userID, post.id);
     persistence.savePost(post);
     persistence.saveSocialSnapshot(snapshot());
-    return post;
+    return toUserView(post, userID);
+  }
+
+  synchronized SocialPost likePost(String postID, String userID) {
+    getUser(userID);
+    SocialPost post = getPost(postID, userID);
+    boolean changed = likes.computeIfAbsent(userID, key -> new HashSet<>()).add(post.id);
+    if (changed) {
+      post.likes = Math.max(0, post.likes + 1);
+    }
+    refreshPostCounts();
+    persistence.saveLike(userID, post.id);
+    persistence.savePost(post);
+    persistence.saveSocialSnapshot(snapshot());
+    return toUserView(post, userID);
+  }
+
+  synchronized SocialPost unlikePost(String postID, String userID) {
+    getUser(userID);
+    SocialPost post = getPost(postID, userID);
+    Set<String> set = likes.get(userID);
+    boolean changed = set != null && set.remove(post.id);
+    if (changed) {
+      post.likes = Math.max(0, post.likes - 1);
+    }
+    refreshPostCounts();
+    persistence.deleteLike(userID, post.id);
+    persistence.savePost(post);
+    persistence.saveSocialSnapshot(snapshot());
+    return toUserView(post, userID);
   }
 
   synchronized void deletePost(String postID, String userID) {
@@ -2187,6 +2281,9 @@ class SocialService {
       if (Objects.equals(item.rootPostId, postID)) item.rootPostId = "";
     }
     for (Set<String> set : bookmarks.values()) {
+      set.remove(postID);
+    }
+    for (Set<String> set : likes.values()) {
       set.remove(postID);
     }
     refreshPostCounts();
@@ -2225,6 +2322,7 @@ class SocialService {
     return slice(posts.stream()
         .filter(p -> !Strings.hasText(p.parentPostId))
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
         .toList(), limit);
   }
@@ -2236,6 +2334,7 @@ class SocialService {
     return slice(posts.stream()
         .filter(p -> !Strings.hasText(p.parentPostId) && currentUserID.equals(p.authorId))
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
         .toList(), limit);
   }
@@ -2245,6 +2344,7 @@ class SocialService {
         .filter(p -> !Strings.hasText(p.parentPostId))
         .filter(this::isNewsPost)
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
         .toList();
     return page(items, limit, offset);
@@ -2255,6 +2355,7 @@ class SocialService {
         .filter(p -> !Strings.hasText(p.parentPostId))
         .filter(p -> !isNewsPost(p))
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparingDouble(this::hotScore).reversed()
             .thenComparing((SocialPost p) -> p.createdAt, Comparator.reverseOrder()))
         .toList();
@@ -2266,6 +2367,7 @@ class SocialService {
         .filter(p -> !Strings.hasText(p.parentPostId))
         .filter(p -> !isNewsPost(p))
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparing((SocialPost p) -> p.createdAt).reversed())
         .toList();
     return page(items, limit, offset);
@@ -2569,6 +2671,10 @@ class SocialService {
     return post;
   }
 
+  synchronized SocialPost getPostView(String id, String currentUserID) {
+    return toUserView(getPost(id, currentUserID), currentUserID);
+  }
+
   private String resolvePostInstance(String requestedInstance, String fallbackInstance) {
     String resolved = Strings.or(requestedInstance, fallbackInstance);
     boolean exists = instances.stream().anyMatch(instance -> instance.name.equals(resolved));
@@ -2590,8 +2696,8 @@ class SocialService {
   synchronized PostThread getPostThread(String id, int limit, String currentUserID) {
     SocialPost post = getPost(id, currentUserID);
     PostThread thread = new PostThread();
-    thread.post = post;
-    thread.ancestors = ancestors(post).stream().filter(item -> canViewPost(item, currentUserID)).toList();
+    thread.post = toUserView(post, currentUserID);
+    thread.ancestors = ancestors(post).stream().filter(item -> canViewPost(item, currentUserID)).map(item -> toUserView(item, currentUserID)).toList();
     thread.replies = listReplies(id, limit, currentUserID);
     return thread;
   }
@@ -2601,6 +2707,7 @@ class SocialService {
     return slice(posts.stream()
         .filter(p -> id.equals(p.parentPostId) || id.equals(p.rootPostId))
         .filter(p -> canViewPost(p, currentUserID))
+        .map(p -> toUserView(p, currentUserID))
         .sorted(Comparator.comparing(p -> p.createdAt))
         .toList(), limit);
   }
@@ -3016,6 +3123,40 @@ class SocialService {
     return posts.stream().filter(p -> p.id.equals(id)).findFirst();
   }
 
+  private SocialPost toUserView(SocialPost source, String userID) {
+    SocialPost post = new SocialPost();
+    post.id = source.id;
+    post.authorId = source.authorId;
+    post.authorHandle = source.authorHandle;
+    post.authorName = source.authorName;
+    post.instance = source.instance;
+    post.kind = source.kind;
+    post.content = source.content;
+    post.visibility = source.visibility;
+    post.storageUri = source.storageUri;
+    post.attestationUri = source.attestationUri;
+    post.chainId = source.chainId;
+    post.txHash = source.txHash;
+    post.contractAddress = source.contractAddress;
+    post.explorerUrl = source.explorerUrl;
+    post.tags = source.tags == null ? new ArrayList<>() : new ArrayList<>(source.tags);
+    post.media = source.media == null ? new ArrayList<>() : new ArrayList<>(source.media);
+    post.parentPostId = source.parentPostId;
+    post.rootPostId = source.rootPostId;
+    post.replyDepth = source.replyDepth;
+    post.replies = source.replies;
+    post.boosts = source.boosts;
+    post.likes = source.likes;
+    post.bookmarks = source.bookmarks;
+    post.type = source.type;
+    post.interaction = source.interaction;
+    post.poll = source.poll;
+    post.createdAt = source.createdAt;
+    post.liked = Strings.hasText(userID) && likes.getOrDefault(userID, Set.of()).contains(source.id);
+    post.bookmarked = Strings.hasText(userID) && bookmarks.getOrDefault(userID, Set.of()).contains(source.id);
+    return post;
+  }
+
   private boolean canViewPost(SocialPost post, String viewerID) {
     if (!Strings.hasText(post.visibility)) return true;
     if ("public".equals(post.visibility) || "unlisted".equals(post.visibility)) return true;
@@ -3386,6 +3527,8 @@ class SocialPost {
   public int boosts;
   public int likes;
   public int bookmarks;
+  public boolean liked;
+  public boolean bookmarked;
   public String type;
   public String interaction;
   public Poll poll;

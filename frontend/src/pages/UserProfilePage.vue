@@ -25,8 +25,8 @@ const error = ref('');
 const user = ref<SocialUser | null>(null);
 const posts = ref<SocialPost[]>([]);
 const following = ref(false);
+const followedUsers = ref<Record<string, boolean>>({});
 const followLoading = ref(false);
-const FOLLOW_STATE_PREFIX = 'mole-follow-state';
 const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
 const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
 const likedPosts = ref<Record<string, boolean>>({});
@@ -116,7 +116,7 @@ async function loadProfile() {
     const profile = await fetchUser(targetUserId);
     user.value = profile;
     posts.value = bootstrap.feed.filter((post) => post.authorId === profile.id);
-    loadFollowState();
+    await syncFollowingState();
     const canonicalHandle = String(profile.handle || '').replace(/^@/, '');
     if (canonicalHandle && normalizedKey !== canonicalHandle) {
       void router.replace(`/profile/${encodeURIComponent(canonicalHandle)}`);
@@ -148,29 +148,24 @@ function goToUserProfile(target: SocialUser) {
   void router.push(`/profile/${encodeURIComponent(key)}`);
 }
 
-function followStorageKey() {
-  const me = currentUser.value?.id || '';
-  const target = user.value?.id || '';
-  return me && target ? `${FOLLOW_STATE_PREFIX}:${me}:${target}` : '';
-}
-
-function followStorageKeyFor(targetId: string) {
-  const me = currentUser.value?.id || '';
-  return me && targetId ? `${FOLLOW_STATE_PREFIX}:${me}:${targetId}` : '';
-}
-
-function loadFollowState() {
-  if (typeof window === 'undefined') return;
-  const key = followStorageKey();
-  if (!key) return;
-  following.value = window.localStorage.getItem(key) === '1';
-}
-
-function persistFollowState() {
-  if (typeof window === 'undefined') return;
-  const key = followStorageKey();
-  if (!key) return;
-  window.localStorage.setItem(key, following.value ? '1' : '0');
+async function syncFollowingState() {
+  const me = currentUser.value?.id;
+  if (!me) {
+    following.value = false;
+    followedUsers.value = {};
+    return;
+  }
+  try {
+    const list = await fetchUserFollowing(me, 300);
+    const next: Record<string, boolean> = {};
+    list.forEach((item) => {
+      next[item.id] = true;
+    });
+    followedUsers.value = next;
+    following.value = Boolean(user.value?.id && next[user.value.id]);
+  } catch {
+    // keep current state on sync failure
+  }
 }
 
 function likeStorageKey() {
@@ -280,7 +275,7 @@ async function toggleFollow() {
       following.value = false;
       user.value = { ...user.value, followers: Math.max(0, user.value.followers - 1) };
     }
-    persistFollowState();
+    followedUsers.value = { ...followedUsers.value, [user.value.id]: next };
   } finally {
     followLoading.value = false;
   }
@@ -288,9 +283,7 @@ async function toggleFollow() {
 
 function isFollowingUser(targetId: string) {
   if (!targetId) return false;
-  const key = followStorageKeyFor(targetId);
-  if (!key || typeof window === 'undefined') return false;
-  return window.localStorage.getItem(key) === '1';
+  return Boolean(followedUsers.value[targetId]);
 }
 
 async function toggleFollowUser(target: SocialUser) {
@@ -303,10 +296,7 @@ async function toggleFollowUser(target: SocialUser) {
     } else {
       await unfollowUser(target.id);
     }
-    const key = followStorageKeyFor(target.id);
-    if (key && typeof window !== 'undefined') {
-      window.localStorage.setItem(key, next ? '1' : '0');
-    }
+    followedUsers.value = { ...followedUsers.value, [target.id]: next };
   } finally {
     followActionLoading.value = { ...followActionLoading.value, [target.id]: false };
   }
@@ -355,6 +345,7 @@ watch(
   () => currentUser.value?.id,
   () => {
     loadInteractionState();
+    void syncFollowingState();
   },
 );
 </script>

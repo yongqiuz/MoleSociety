@@ -23,8 +23,10 @@ import {
   followUser,
   getConversation,
   listConversations,
+  likePost,
   unfollowUser,
   unbookmarkPost,
+  unlikePost,
   updateUserProfile,
   voteOnPoll,
   type BootstrapPayload,
@@ -297,6 +299,7 @@ const relationLoading = ref(false);
 const relationError = ref('');
 const followActionLoading = ref<Record<string, boolean>>({});
 const bookmarkActionLoading = ref<Record<string, boolean>>({});
+const likeActionLoading = ref<Record<string, boolean>>({});
 
 const threadedReplies = computed(() => {
   const root = threadFocusPost.value;
@@ -399,9 +402,6 @@ const POSTING_PRIVACY_STORAGE_KEY = 'mole-posting-privacy-settings';
 const PRIVACY_SETTINGS_STORAGE_KEY = 'mole-privacy-settings';
 const PULL_MAX_DISTANCE = 120;
 const PULL_REFRESH_THRESHOLD = 72;
-const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
-const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
-const POST_ENGAGEMENT_STORAGE_PREFIX = 'mole-post-engagement';
 const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
 const MESSAGE_IMAGE_EMOJI_PREFIX = '[IMAGE_EMOJI]';
 const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
@@ -1425,9 +1425,30 @@ function bumpPostStatEverywhere(postId: string, field: 'likes' | 'bookmarks', de
 }
 
 function toggleLike(postId: string) {
-  const next = !likedPosts.value[postId];
+  void toggleLikeAsync(postId);
+}
+
+async function toggleLikeAsync(postId: string) {
+  if (!postId || likeActionLoading.value[postId]) return;
+  const previous = Boolean(likedPosts.value[postId]);
+  const next = !previous;
+  likeActionLoading.value = { ...likeActionLoading.value, [postId]: true };
   likedPosts.value = { ...likedPosts.value, [postId]: next };
   bumpPostStatEverywhere(postId, 'likes', next ? 1 : -1);
+  try {
+    const updated = next ? await likePost(postId) : await unlikePost(postId);
+    applyUpdatedPostEverywhere(updated);
+  } catch (error) {
+    likedPosts.value = { ...likedPosts.value, [postId]: previous };
+    bumpPostStatEverywhere(postId, 'likes', previous ? 1 : -1);
+    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
+      void router.push({ path: '/login', query: { redirect: '/app' } });
+      return;
+    }
+    errorMessage.value = '点赞操作失败，请稍后重试。';
+  } finally {
+    likeActionLoading.value = { ...likeActionLoading.value, [postId]: false };
+  }
 }
 
 function applyUpdatedPostEverywhere(updatedPost: SocialPost) {
@@ -1446,16 +1467,17 @@ function applyUpdatedPostEverywhere(updatedPost: SocialPost) {
 
 async function toggleBookmark(postId: string) {
   if (!postId || bookmarkActionLoading.value[postId]) return;
-  const next = !bookmarkedPosts.value[postId];
+  const previous = Boolean(bookmarkedPosts.value[postId]);
+  const next = !previous;
   bookmarkActionLoading.value = { ...bookmarkActionLoading.value, [postId]: true };
+  bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: next };
+  bumpPostStatEverywhere(postId, 'bookmarks', next ? 1 : -1);
   try {
     const updated = next ? await bookmarkPost(postId) : await unbookmarkPost(postId);
-    bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: next };
     applyUpdatedPostEverywhere(updated);
-    if (!updated) {
-      bumpPostStatEverywhere(postId, 'bookmarks', next ? 1 : -1);
-    }
   } catch (error) {
+    bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: previous };
+    bumpPostStatEverywhere(postId, 'bookmarks', previous ? 1 : -1);
     if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
       void router.push({ path: '/login', query: { redirect: '/app' } });
       return;
@@ -1466,66 +1488,14 @@ async function toggleBookmark(postId: string) {
   }
 }
 
-function likeStorageKey() {
-  const userId = authSession.value?.id;
-  return userId ? `${LIKE_STORAGE_PREFIX}:${userId}` : '';
-}
-
-function bookmarkStorageKey() {
-  const userId = authSession.value?.id;
-  return userId ? `${BOOKMARK_STORAGE_PREFIX}:${userId}` : '';
-}
-
-function postEngagementStorageKey() {
-  const userId = authSession.value?.id;
-  return userId ? `${POST_ENGAGEMENT_STORAGE_PREFIX}:${userId}` : '';
-}
-
 function loadInteractionState() {
-  if (typeof window === 'undefined') return;
-  const likeKey = likeStorageKey();
-  const bookmarkKey = bookmarkStorageKey();
-  const engagementKey = postEngagementStorageKey();
   likedPosts.value = {};
   bookmarkedPosts.value = {};
   postEngagement.value = {};
-  if (likeKey) {
-    try {
-      likedPosts.value = JSON.parse(window.localStorage.getItem(likeKey) || '{}');
-    } catch {
-      likedPosts.value = {};
-    }
-  }
-  if (bookmarkKey) {
-    try {
-      bookmarkedPosts.value = JSON.parse(window.localStorage.getItem(bookmarkKey) || '{}');
-    } catch {
-      bookmarkedPosts.value = {};
-    }
-  }
-  if (engagementKey) {
-    try {
-      postEngagement.value = JSON.parse(window.localStorage.getItem(engagementKey) || '{}');
-    } catch {
-      postEngagement.value = {};
-    }
-  }
 }
 
 function persistInteractionState() {
-  if (typeof window === 'undefined') return;
-  const likeKey = likeStorageKey();
-  const bookmarkKey = bookmarkStorageKey();
-  const engagementKey = postEngagementStorageKey();
-  if (likeKey) {
-    window.localStorage.setItem(likeKey, JSON.stringify(likedPosts.value));
-  }
-  if (bookmarkKey) {
-    window.localStorage.setItem(bookmarkKey, JSON.stringify(bookmarkedPosts.value));
-  }
-  if (engagementKey) {
-    window.localStorage.setItem(engagementKey, JSON.stringify(postEngagement.value));
-  }
+  // Interaction state is server-driven; optimistic UI should not be persisted locally.
 }
 
 function notificationReadStorageKey() {
@@ -1979,9 +1949,10 @@ function goToLogout() {
 function toFeedCard(post: SocialPost): FeedCard {
   const firstMedia = Array.isArray(post.media) ? post.media[0] : undefined;
   const person = findPersonById(post.authorId);
-  const savedEngagement = postEngagement.value[post.id];
-  const likes = savedEngagement ? Math.max(savedEngagement.likes, Number(post.likes || 0)) : Number(post.likes || 0);
-  const bookmarks = savedEngagement ? Math.max(savedEngagement.bookmarks, Number(post.bookmarks || 0)) : Number(post.bookmarks || 0);
+  const likes = Number(post.likes || 0);
+  const bookmarks = Number(post.bookmarks || 0);
+  likedPosts.value = { ...likedPosts.value, [post.id]: Boolean(post.liked) };
+  bookmarkedPosts.value = { ...bookmarkedPosts.value, [post.id]: Boolean(post.bookmarked) };
   return {
     id: post.id,
     authorId: post.authorId,
@@ -2266,7 +2237,26 @@ function applyBootstrap(payload: BootstrapPayload) {
     }
   }
   selectedConversationId.value = conversations.value[0]?.id ?? '';
+  void syncFollowedUsersFromServer();
   void syncFollowerNotifications();
+}
+
+async function syncFollowedUsersFromServer() {
+  const userId = currentUser.value?.id;
+  if (!userId) {
+    followedUsers.value = {};
+    return;
+  }
+  try {
+    const following = await fetchUserFollowing(userId, 300);
+    const next: Record<string, boolean> = {};
+    following.forEach((item) => {
+      next[item.id] = true;
+    });
+    followedUsers.value = next;
+  } catch {
+    // keep existing state on sync failure
+  }
 }
 
 watch([people, currentUser], () => {
@@ -3503,6 +3493,7 @@ watch(
 watch(
   () => authSession.value?.id,
   () => {
+    followedUsers.value = {};
     conversations.value = [];
     selectedConversationId.value = '';
     messageDraft.value = '';

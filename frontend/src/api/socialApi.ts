@@ -58,6 +58,8 @@ export type SocialPost = {
   boosts: number;
   likes: number;
   bookmarks?: number;
+  liked?: boolean;
+  bookmarked?: boolean;
   poll?: Poll;
   createdAt: string;
 };
@@ -302,6 +304,19 @@ export async function bookmarkPost(postId: string) {
 
 export async function unbookmarkPost(postId: string) {
   return request<SocialPost>(`/social/posts/${postId}/bookmark`, {
+    method: 'DELETE',
+  });
+}
+
+export async function likePost(postId: string) {
+  return request<SocialPost>(`/social/posts/${postId}/like`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function unlikePost(postId: string) {
+  return request<SocialPost>(`/social/posts/${postId}/like`, {
     method: 'DELETE',
   });
 }
