@@ -255,6 +255,7 @@ const errorMessage = ref('');
 const followedUsers = ref<Record<string, boolean>>({});
 const likedPosts = ref<Record<string, boolean>>({});
 const bookmarkedPosts = ref<Record<string, boolean>>({});
+const postEngagement = ref<Record<string, { likes: number; bookmarks: number }>>({});
 const showForwardDialog = ref(false);
 const forwardingPost = ref<FeedCard | null>(null);
 const forwardingConversationId = ref('');
@@ -400,6 +401,7 @@ const PULL_MAX_DISTANCE = 120;
 const PULL_REFRESH_THRESHOLD = 72;
 const LIKE_STORAGE_PREFIX = 'mole-liked-posts';
 const BOOKMARK_STORAGE_PREFIX = 'mole-bookmarked-posts';
+const POST_ENGAGEMENT_STORAGE_PREFIX = 'mole-post-engagement';
 const FORWARDED_POST_PREFIX = '[FORWARDED_POST]';
 const MESSAGE_IMAGE_EMOJI_PREFIX = '[IMAGE_EMOJI]';
 const NOTIFICATION_READ_STORAGE_PREFIX = 'mole-notification-read';
@@ -1279,6 +1281,24 @@ const mentionItems = computed(() => {
     }));
 });
 
+const outgoingMentionItems = computed(() => {
+  if (!currentUser.value) return [];
+  return allKnownPosts.value
+    .filter((post) => post.authorId === currentUser.value?.id)
+    .filter((post) => {
+      const content = String(post.content || '');
+      return /(^|\s)@[^\s@]+/.test(content);
+    })
+    .sort((a, b) => postCreatedAtTs(b) - postCreatedAtTs(a))
+    .map((post) => ({
+      id: `outgoing-${post.id}`,
+      postId: post.id,
+      title: '你提及了其他用户',
+      body: post.content,
+      time: post.time || '刚刚',
+    }));
+});
+
 const unreadNotificationCount = computed(() =>
   orderedNotificationItems.value.filter((item) => !readNotificationIds.value[item.id]).length,
 );
@@ -1369,12 +1389,28 @@ function updatePostInList(list: FeedCard[], postId: string, updater: (post: Feed
   return list.map((item) => (item.id === postId ? updater(item) : item));
 }
 
+function upsertPostEngagement(postId: string, likes: number, bookmarks: number) {
+  if (!postId) return;
+  postEngagement.value = {
+    ...postEngagement.value,
+    [postId]: {
+      likes: Math.max(0, Number(likes || 0)),
+      bookmarks: Math.max(0, Number(bookmarks || 0)),
+    },
+  };
+}
+
 function bumpPostStatEverywhere(postId: string, field: 'likes' | 'bookmarks', delta: number) {
+  const current = postEngagement.value[postId] || { likes: 0, bookmarks: 0 };
+  const nextLikes = field === 'likes' ? Math.max(0, current.likes + delta) : current.likes;
+  const nextBookmarks = field === 'bookmarks' ? Math.max(0, current.bookmarks + delta) : current.bookmarks;
+  upsertPostEngagement(postId, nextLikes, nextBookmarks);
   const apply = (post: FeedCard): FeedCard => ({
     ...post,
     stats: {
       ...post.stats,
-      [field]: Math.max(0, Number(post.stats[field] || 0) + delta),
+      likes: field === 'likes' ? nextLikes : Math.max(0, Number(post.stats.likes || 0)),
+      bookmarks: field === 'bookmarks' ? nextBookmarks : Math.max(0, Number(post.stats.bookmarks || 0)),
     },
   });
   posts.value = updatePostInList(posts.value, postId, apply);
@@ -1396,6 +1432,7 @@ function toggleLike(postId: string) {
 
 function applyUpdatedPostEverywhere(updatedPost: SocialPost) {
   const card = toFeedCard(updatedPost);
+  upsertPostEngagement(card.id, card.stats.likes, card.stats.bookmarks);
   posts.value = posts.value.map((item) => (item.id === card.id ? card : item));
   myPosts.value = myPosts.value.map((item) => (item.id === card.id ? card : item));
   explorePostsTimeline.value = explorePostsTimeline.value.map((item) => (item.id === card.id ? card : item));
@@ -1415,6 +1452,9 @@ async function toggleBookmark(postId: string) {
     const updated = next ? await bookmarkPost(postId) : await unbookmarkPost(postId);
     bookmarkedPosts.value = { ...bookmarkedPosts.value, [postId]: next };
     applyUpdatedPostEverywhere(updated);
+    if (!updated) {
+      bumpPostStatEverywhere(postId, 'bookmarks', next ? 1 : -1);
+    }
   } catch (error) {
     if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_SESSION_REQUIRED')) {
       void router.push({ path: '/login', query: { redirect: '/app' } });
@@ -1436,12 +1476,19 @@ function bookmarkStorageKey() {
   return userId ? `${BOOKMARK_STORAGE_PREFIX}:${userId}` : '';
 }
 
+function postEngagementStorageKey() {
+  const userId = authSession.value?.id;
+  return userId ? `${POST_ENGAGEMENT_STORAGE_PREFIX}:${userId}` : '';
+}
+
 function loadInteractionState() {
   if (typeof window === 'undefined') return;
   const likeKey = likeStorageKey();
   const bookmarkKey = bookmarkStorageKey();
+  const engagementKey = postEngagementStorageKey();
   likedPosts.value = {};
   bookmarkedPosts.value = {};
+  postEngagement.value = {};
   if (likeKey) {
     try {
       likedPosts.value = JSON.parse(window.localStorage.getItem(likeKey) || '{}');
@@ -1456,17 +1503,28 @@ function loadInteractionState() {
       bookmarkedPosts.value = {};
     }
   }
+  if (engagementKey) {
+    try {
+      postEngagement.value = JSON.parse(window.localStorage.getItem(engagementKey) || '{}');
+    } catch {
+      postEngagement.value = {};
+    }
+  }
 }
 
 function persistInteractionState() {
   if (typeof window === 'undefined') return;
   const likeKey = likeStorageKey();
   const bookmarkKey = bookmarkStorageKey();
+  const engagementKey = postEngagementStorageKey();
   if (likeKey) {
     window.localStorage.setItem(likeKey, JSON.stringify(likedPosts.value));
   }
   if (bookmarkKey) {
     window.localStorage.setItem(bookmarkKey, JSON.stringify(bookmarkedPosts.value));
+  }
+  if (engagementKey) {
+    window.localStorage.setItem(engagementKey, JSON.stringify(postEngagement.value));
   }
 }
 
@@ -1921,6 +1979,9 @@ function goToLogout() {
 function toFeedCard(post: SocialPost): FeedCard {
   const firstMedia = Array.isArray(post.media) ? post.media[0] : undefined;
   const person = findPersonById(post.authorId);
+  const savedEngagement = postEngagement.value[post.id];
+  const likes = savedEngagement ? Math.max(savedEngagement.likes, Number(post.likes || 0)) : Number(post.likes || 0);
+  const bookmarks = savedEngagement ? Math.max(savedEngagement.bookmarks, Number(post.bookmarks || 0)) : Number(post.bookmarks || 0);
   return {
     id: post.id,
     authorId: post.authorId,
@@ -1955,8 +2016,8 @@ function toFeedCard(post: SocialPost): FeedCard {
     stats: {
       replies: post.replies,
       boosts: post.boosts,
-      likes: post.likes,
-      bookmarks: post.bookmarks || 0,
+      likes,
+      bookmarks,
     },
     poll: post.poll,
   };
@@ -3451,7 +3512,7 @@ watch(
   },
 );
 
-watch([likedPosts, bookmarkedPosts], () => {
+watch([likedPosts, bookmarkedPosts, postEngagement], () => {
   persistInteractionState();
 }, { deep: true });
 
@@ -3553,9 +3614,6 @@ function triggerSearchFromInput() {
                 >
                   搜索
                 </button>
-              </div>
-              <div class="mt-2 px-1 text-[11px] text-[color:var(--text-muted)]">
-                支持昵称、账号、帖子正文、标签的模糊搜索
               </div>
             </div>
 
@@ -3690,7 +3748,7 @@ function triggerSearchFromInput() {
                     <div class="flex-1 space-y-1 border-l border-emerald-500/10 pl-4">
                       <label class="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">类型</label>
                       <div class="block w-full text-left text-sm font-bold text-emerald-400">
-                        单选（暂不支持多选）
+                        单选
                       </div>
                     </div>
                   </div>
@@ -3715,8 +3773,8 @@ function triggerSearchFromInput() {
                     >
                       <Hash class="w-5 h-5 cursor-pointer transition-transform hover:scale-110" :class="showTagPicker ? 'text-emerald-400' : 'hover:text-emerald-400'" />
                     </button>
-                    <button ref="emojiTriggerRef" @click.stop="toggleEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
-                      <Smile class="w-5 h-5 hover:text-yellow-400 cursor-pointer transition-transform hover:scale-110" />
+                    <button ref="emojiTriggerRef" @click.stop="toggleEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showEmojiPicker ? 'text-emerald-400 bg-emerald-500/10' : ''" title="表情">
+                      <Smile class="w-5 h-5 hover:text-emerald-400 cursor-pointer transition-transform hover:scale-110" />
                     </button>
                   </div>
                   <span
@@ -3729,7 +3787,8 @@ function triggerSearchFromInput() {
                   v-if="showEmojiPicker"
                   ref="emojiPickerPanelRef"
                   @click.stop
-                  class="absolute bottom-full right-0 z-[9999] mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-yellow-400/25 bg-[var(--panel-bg)] p-2 shadow-[0_20px_50px_rgba(0,0,0,0.38)]"
+                  :style="emojiPickerFloatingStyle"
+                  class="fixed z-[99999] overflow-hidden rounded-2xl border border-yellow-400/25 bg-[var(--panel-bg)] p-2 shadow-[0_20px_50px_rgba(0,0,0,0.38)]"
                 >
                   <emoji-picker @emoji-click="handleEmojiPick" locale="zh-Hans" preview-position="none" skin-tone-emoji="👍"></emoji-picker>
                   <div class="mt-2 px-2 text-[11px] text-[color:var(--text-muted)]">点击表情即可插入</div>
@@ -4154,38 +4213,6 @@ function triggerSearchFromInput() {
                       </div>
                     </div>
 
-                    <div v-if="threadFocusPost.poll" class="mt-4 space-y-2 rounded-xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-4">
-                      <div v-for="(opt, idx) in threadFocusPost.poll.options" :key="idx" class="relative">
-                        <div v-if="threadFocusPost.poll.voters.includes(currentUser?.id || '') || new Date(threadFocusPost.poll.expiresAt) < new Date()" class="group overflow-hidden rounded-lg bg-[var(--frame-bg)]">
-                          <div 
-                            class="absolute inset-y-0 left-0 bg-emerald-500/20 transition-all duration-1000"
-                            :style="{ width: `${(opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100}%` }"
-                          ></div>
-                          <div class="relative flex items-center justify-between px-4 py-2.5 text-sm">
-                            <span class="font-medium text-[color:var(--text-primary)]">{{ opt.label }}</span>
-                            <span class="font-bold text-emerald-400">
-                              {{ Math.round((opt.votes / Math.max(1, threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0))) * 100) }}%
-                            </span>
-                          </div>
-                        </div>
-                        <button 
-                          v-else 
-                          @click="handleVote(threadFocusPost, [idx])"
-                          class="w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5 text-left text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/10 hover:border-emerald-500/50"
-                        >
-                          {{ opt.label }}
-                        </button>
-                      </div>
-                      
-                      <div class="mt-3 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
-                        <div class="flex items-center gap-3">
-                          <span>{{ threadFocusPost.poll.options.reduce((a, b) => a + b.votes, 0) }} 票</span>
-                          <span class="opacity-30">·</span>
-                          <span>{{ new Date(threadFocusPost.poll.expiresAt) < new Date() ? '已结束' : '进行中' }}</span>
-                        </div>
-                      </div>
-                    </div>
-
                     <div
                       v-if="threadFocusPost.media"
                       class="mt-4 overflow-hidden rounded-2xl"
@@ -4295,7 +4322,7 @@ function triggerSearchFromInput() {
                             <ImageIcon class="w-4 h-4 text-emerald-300" />
                             <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                           </label>
-                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showReplyEmojiPicker ? 'text-emerald-400 bg-emerald-500/10' : ''" title="表情">
                             <Smile class="w-4 h-4" />
                           </button>
                         </div>
@@ -4392,7 +4419,7 @@ function triggerSearchFromInput() {
                             <ImageIcon class="w-4 h-4 text-emerald-300" />
                             <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                           </label>
-                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                          <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showReplyEmojiPicker ? 'text-emerald-400 bg-emerald-500/10' : ''" title="表情">
                             <Smile class="w-4 h-4" />
                           </button>
                         </div>
@@ -4463,7 +4490,7 @@ function triggerSearchFromInput() {
                                 <ImageIcon class="w-4 h-4 text-emerald-300" />
                                 <input ref="replyFileInputRef" type="file" accept="image/*" class="hidden" @change="handleReplyMediaChange" />
                               </label>
-                              <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showReplyEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                              <button ref="replyEmojiTriggerRef" @click.stop="toggleReplyEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showReplyEmojiPicker ? 'text-emerald-400 bg-emerald-500/10' : ''" title="表情">
                                 <Smile class="w-4 h-4" />
                               </button>
                             </div>
@@ -5068,10 +5095,10 @@ function triggerSearchFromInput() {
                             <button @click="triggerMessageImagePicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" title="发送图片表情">
                               <ImageIcon class="h-4 w-4" />
                             </button>
-                            <button ref="messageStickerTriggerRef" @click.stop="toggleMessageStickerPanel" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showMessageStickerPanel ? 'text-emerald-500 bg-emerald-500/10' : ''" title="图片表情库">
-                              <Smile class="h-4 w-4" />
+                            <button ref="messageStickerTriggerRef" @click.stop="toggleMessageStickerPanel" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showMessageStickerPanel ? 'text-emerald-500 bg-emerald-500/10' : ''" title="我发表过的表情">
+                              <Bookmark class="h-4 w-4" />
                             </button>
-                            <button ref="messageEmojiTriggerRef" @click.stop="toggleMessageEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-yellow-400/10" :class="showMessageEmojiPicker ? 'text-yellow-400 bg-yellow-400/10' : ''" title="表情">
+                            <button ref="messageEmojiTriggerRef" @click.stop="toggleMessageEmojiPicker" class="rounded-lg p-1.5 transition-colors hover:bg-emerald-500/10" :class="showMessageEmojiPicker ? 'text-emerald-400 bg-emerald-500/10' : ''" title="表情">
                               <Pencil class="h-4 w-4" />
                             </button>
                             <div class="text-xs text-[color:var(--text-muted)]">{{ messageDraft.trim().length }}/1000</div>
@@ -5262,9 +5289,36 @@ function triggerSearchFromInput() {
           </section>
 
           <section v-else-if="currentSection === 'mentions'" class="divide-y divide-[color:var(--border-color)]">
-            <article v-for="item in mentionItems" :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
+            <div class="px-5 py-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">收到的提及</div>
+            <article v-if="mentionItems.length === 0" class="px-6 py-8 text-center text-sm text-[color:var(--text-muted)]">
+              暂无别人提及你的内容。
+            </article>
+            <article v-for="item in mentionItems" v-else :key="item.id" class="px-5 py-5 transition hover:bg-[var(--panel-soft)]">
               <div class="flex items-start gap-4">
                 <div class="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600/12 text-emerald-600">@</div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ item.title }}</div>
+                    <div class="text-sm text-[color:var(--text-muted)]">{{ item.time }}</div>
+                  </div>
+                  <div class="mt-2 text-base leading-7 text-[color:var(--text-secondary)]">{{ item.body }}</div>
+                </div>
+              </div>
+            </article>
+
+            <div class="px-5 py-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--text-muted)]">我发出的提及</div>
+            <article v-if="outgoingMentionItems.length === 0" class="px-6 py-8 text-center text-sm text-[color:var(--text-muted)]">
+              你还没有发出提及。
+            </article>
+            <article
+              v-for="item in outgoingMentionItems"
+              v-else
+              :key="item.id"
+              class="cursor-pointer px-5 py-5 transition hover:bg-[var(--panel-soft)]"
+              @click="openPostDetail(item.postId, false)"
+            >
+              <div class="flex items-start gap-4">
+                <div class="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-600/12 text-cyan-500">@</div>
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ item.title }}</div>
