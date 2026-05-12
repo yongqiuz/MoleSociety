@@ -389,16 +389,22 @@ const isReplyingRoot = computed(() => !!threadFocusPost.value && activeReplyTarg
 const { themeStyles, appearanceSettings } = useAppearance();
 
 const activeExploreTab = ref<ExploreTab>('posts');
+const newsTimeline = ref<FeedCard[]>([]);
+const newsLoading = ref(false);
+const explorePostsTimeline = ref<FeedCard[]>([]);
+const explorePostsLoading = ref(false);
 
-const newsPosts = computed(() => posts.value.filter((p) => {
+function isNewsPost(p: FeedCard) {
   const normalizedType = String(p.type || '').trim().toLowerCase();
   if (normalizedType === 'news') return true;
   const tags = Array.isArray(p.tags) ? p.tags : [];
   if (tags.some((tag) => String(tag).includes('新闻') || String(tag).includes('热点'))) return true;
   const handle = String(p.handle || '').trim().toLowerCase();
   if (handle === '@news_bot' || handle === 'news_bot') return true;
-  return String(p.content || '').trim().startsWith('【');
-}));
+  return false;
+}
+
+const newsPosts = computed(() => newsTimeline.value.filter((p) => isNewsPost(p)));
 
 function parseNewsContent(content: string) {
   const text = String(content || '').trim();
@@ -414,6 +420,21 @@ function parseNewsContent(content: string) {
     title: (sourceMatch[2] || '').trim() || first,
     link,
   };
+}
+
+async function loadNewsTimeline(force = false) {
+  if (newsLoading.value) return;
+  if (!force && newsTimeline.value.length > 0) return;
+  newsLoading.value = true;
+  try {
+    if (!apiOnline.value) return;
+    const payload = await fetchSocialBootstrap(200);
+    newsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => isNewsPost(post));
+  } catch {
+    // keep current timeline, avoid interrupting main flow
+  } finally {
+    newsLoading.value = false;
+  }
 }
 const activeMoreMenuId = ref<string | null>(null);
 
@@ -610,7 +631,8 @@ function postCreatedAtTs(post: FeedCard) {
 }
 
 const exploreTimeline = computed(() =>
-  [...timeline.value].sort((a, b) => {
+  [...explorePostsTimeline.value]
+    .sort((a, b) => {
     const likeDelta = (b.stats.likes || 0) - (a.stats.likes || 0);
     if (likeDelta !== 0) return likeDelta;
     const bookmarkDelta = (b.stats.bookmarks || 0) - (a.stats.bookmarks || 0);
@@ -618,6 +640,21 @@ const exploreTimeline = computed(() =>
     return postCreatedAtTs(b) - postCreatedAtTs(a);
   }),
 );
+
+async function loadExplorePostsTimeline(force = false) {
+  if (explorePostsLoading.value) return;
+  if (!force && explorePostsTimeline.value.length > 0) return;
+  explorePostsLoading.value = true;
+  try {
+    if (!apiOnline.value) return;
+    const payload = await fetchSocialBootstrap(200);
+    explorePostsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => !isNewsPost(post));
+  } catch {
+    // keep current timeline, avoid interrupting main flow
+  } finally {
+    explorePostsLoading.value = false;
+  }
+}
 
 const selectedInstance = computed(() =>
   instances.value.find((instance) => instance.name === selectedInstanceName.value) ?? null,
@@ -1692,6 +1729,8 @@ function applyBootstrap(payload: BootstrapPayload) {
   currentUser.value = resolveAuthenticatedUser(payload.users) ?? payload.currentUser ?? payload.users[0] ?? null;
   people.value = payload.users;
   posts.value = hydrateFeedCardList(payload.feed.map(toFeedCard));
+  explorePostsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => !isNewsPost(post));
+  newsTimeline.value = hydrateFeedCardList(payload.feed.map(toFeedCard)).filter((post) => isNewsPost(post));
   assets.value = payload.media.map(toAssetCard);
   const mappedConversations = payload.conversations
     .map((conversation) => toConversationCard(conversation, currentUser.value?.id ?? null))
@@ -2680,6 +2719,20 @@ watch(
   async ([section]) => {
     if (section !== 'lists') return;
     await measureClientInstanceLatency();
+  },
+  { immediate: true },
+);
+
+watch(
+  [() => currentSection.value, () => activeExploreTab.value],
+  ([section, tab]) => {
+    if (section !== 'explore') return;
+    if (tab === 'posts') {
+      void loadExplorePostsTimeline();
+      return;
+    }
+    if (tab !== 'news') return;
+    void loadNewsTimeline();
   },
   { immediate: true },
 );
@@ -3750,6 +3803,12 @@ watch(
             <div class="divide-y divide-[color:var(--border-color)]">
               <!-- Posts Tab -->
               <template v-if="activeExploreTab === 'posts'">
+                <div v-if="explorePostsLoading" class="p-6 text-sm text-[color:var(--text-muted)]">
+                  热门加载中...
+                </div>
+                <div v-else-if="exploreTimeline.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
+                  目前没有用户发布的热门摩文。
+                </div>
                 <PostFeedCard
                   v-for="post in exploreTimeline"
                   :key="post.id"
@@ -3863,7 +3922,10 @@ watch(
 
               <!-- News Tab -->
               <template v-else-if="activeExploreTab === 'news'">
-                <div v-if="newsPosts.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
+                <div v-if="newsLoading" class="p-6 text-sm text-[color:var(--text-muted)]">
+                  新闻加载中...
+                </div>
+                <div v-else-if="newsPosts.length === 0" class="p-12 text-center text-[color:var(--text-muted)]">
                   目前没有最新的新闻摩文。
                 </div>
                 <article v-for="post in newsPosts" :key="post.id" class="p-6 transition hover:bg-[var(--panel-soft)]">

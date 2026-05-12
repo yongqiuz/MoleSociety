@@ -2427,8 +2427,22 @@ class SocialService {
     post.media = new ArrayList<>();
     String cover = fetchNewsCoverImage(entry.link);
     if (Strings.hasText(cover)) {
+      MediaAsset coverAsset = new MediaAsset();
+      coverAsset.id = nextID("media");
+      coverAsset.ownerId = author.id;
+      coverAsset.name = "news-cover";
+      coverAsset.kind = "image";
+      coverAsset.url = cover;
+      coverAsset.storageUri = "news://cover/" + post.id;
+      coverAsset.cid = "";
+      coverAsset.sizeBytes = 0L;
+      coverAsset.status = "ready";
+      coverAsset.createdAt = Instant.now().toString();
+      media.add(0, coverAsset);
+      persistence.saveMedia(coverAsset);
+
       PostMedia coverMedia = new PostMedia();
-      coverMedia.id = nextID("media");
+      coverMedia.id = coverAsset.id;
       coverMedia.name = "news-cover";
       coverMedia.url = cover;
       coverMedia.kind = "image";
