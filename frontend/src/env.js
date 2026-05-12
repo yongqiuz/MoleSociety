@@ -1,4 +1,4 @@
-export const env = 'dev'; // ['dev', 'prod']
+export const env = 'prod'; // ['dev', 'prod']
 
 export const backendOriginByEnv = {
   dev: 'https://dev.longyinstudio.cn',
