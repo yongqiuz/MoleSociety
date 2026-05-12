@@ -200,6 +200,7 @@ type CreateConversationRequest = {
 
 export type UpdateUserRequest = {
   username?: string;
+  email?: string;
   displayName?: string;
   bio?: string;
   instance?: string;

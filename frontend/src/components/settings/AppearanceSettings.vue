@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { useAppearance, type ColorScheme } from '../../composables/useAppearance';
+import { useAppearance, type ColorScheme, type LanguageCode } from '../../composables/useAppearance';
 import { ChevronDown } from 'lucide-vue-next';
 
 const { appearanceSettings, saveAppearanceSettings, setColorSchemePreview, clearColorSchemePreview } = useAppearance();
@@ -55,7 +55,7 @@ const colorSchemeOptions: { value: ColorScheme; label: string; desc: string }[] 
   { value: 'dark', label: '深色', desc: '降低亮度，适合夜间使用' },
 ];
 
-const languageOptions = [
+const languageOptions: { value: LanguageCode; label: string }[] = [
   { value: 'zh-CN', label: '简体中文' },
   { value: 'en-US', label: 'English' },
 ];
@@ -100,7 +100,7 @@ function toggleTimezoneOpen() {
   if (timezoneOpen.value) languageOpen.value = false;
 }
 
-function pickLanguage(value: string) {
+function pickLanguage(value: LanguageCode) {
   appearanceDraft.value.language = value;
   languageOpen.value = false;
 }

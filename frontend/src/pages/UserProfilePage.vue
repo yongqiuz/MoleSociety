@@ -391,7 +391,15 @@ watch(
                   <template v-else>{{ avatarText(user.displayName) }}</template>
                 </div>
                 <div>
-                  <div class="text-2xl font-semibold text-[color:var(--text-primary)]">{{ user.displayName }}</div>
+                  <div class="flex items-center gap-2">
+                    <div class="text-2xl font-semibold text-[color:var(--text-primary)]">{{ user.displayName }}</div>
+                    <span
+                      v-if="user.isBot"
+                      class="inline-flex items-center rounded-md border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-cyan-300"
+                    >
+                      BOT
+                    </span>
+                  </div>
                   <div class="text-sm text-[color:var(--text-muted)]">{{ formatHandleInstance(user.handle, user.instance) }}</div>
                 </div>
               </div>
@@ -453,6 +461,12 @@ watch(
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <div class="text-lg font-semibold text-[color:var(--text-primary)]">{{ user.displayName }}</div>
+                  <span
+                    v-if="user.isBot"
+                    class="inline-flex items-center rounded-md border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-cyan-300"
+                  >
+                    BOT
+                  </span>
                   <div class="text-sm text-[color:var(--text-secondary)]">{{ formatHandleInstance(user.handle, user.instance) }}</div>
                   <div class="text-xs text-[color:var(--text-muted)]">{{ formatTimestamp(post.createdAt) }}</div>
                 </div>

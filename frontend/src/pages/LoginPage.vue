@@ -354,7 +354,7 @@ async function signInWithWallet() {
                     v-model="registerForm.email"
                     type="email" 
                     class="w-full rounded-2xl border border-white/10 bg-slate-950/60 py-3.5 pl-12 pr-4 text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/50 focus:bg-slate-900/80 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 transition-all font-medium"
-                    placeholder="可选，用于找回密码"
+                    placeholder="可选"
                   >
                 </div>
               </div>

@@ -27,6 +27,7 @@ type FeedCard = {
   time: string;
   content: string;
   bio?: string;
+  isBot?: boolean;
   tags: string[];
   media?: {
     name: string;
@@ -95,6 +96,12 @@ function avatarText(name: string) {
             >
               {{ post.author }}
             </button>
+            <span
+              v-if="post.isBot"
+              class="inline-flex items-center rounded-md border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-cyan-300"
+            >
+              BOT
+            </span>
             <span class="text-sm text-[color:var(--text-secondary)]">@{{ post.instance }}</span>
             <span class="text-xs text-[color:var(--text-muted)]">{{ post.time }}</span>
           </div>

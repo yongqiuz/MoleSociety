@@ -181,7 +181,11 @@ class AuthController {
     try {
       AuthResult result = auth.verifyWalletLogin(req.address, req.nonce, req.signature);
       setSessionCookie(response, result.session.id);
-      return ApiResponse.ok(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
+      return ApiResponse.ok(AuthSessionResponse.from(
+          result.user,
+          auth.usernameByUserId(result.user.id),
+          auth.emailByUserId(result.user.id),
+          auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -192,7 +196,11 @@ class AuthController {
     try {
       AuthResult result = auth.passwordLogin(req.identifier, req.password);
       setSessionCookie(response, result.session.id);
-      return ApiResponse.ok(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
+      return ApiResponse.ok(AuthSessionResponse.from(
+          result.user,
+          auth.usernameByUserId(result.user.id),
+          auth.emailByUserId(result.user.id),
+          auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -203,7 +211,11 @@ class AuthController {
     try {
       AuthResult result = auth.register(req, requestOrigin(request));
       setSessionCookie(response, result.session.id);
-      return ApiResponse.created(AuthSessionResponse.from(result.user, auth.usernameByUserId(result.user.id), auth.requiresCurrentPassword(result.user.id)));
+      return ApiResponse.created(AuthSessionResponse.from(
+          result.user,
+          auth.usernameByUserId(result.user.id),
+          auth.emailByUserId(result.user.id),
+          auth.requiresCurrentPassword(result.user.id)));
     } catch (ApiException err) {
       return err.toResponse();
     }
@@ -223,7 +235,11 @@ class AuthController {
   ResponseEntity<ApiResponse<AuthSessionResponse>> me(HttpServletRequest request, HttpServletResponse response) {
     try {
       SocialUser user = auth.userFromRequest(request).orElseThrow(() -> ApiException.unauthorized("AUTH_SESSION_REQUIRED", "session", "authentication required"));
-      return ApiResponse.ok(AuthSessionResponse.from(user, auth.usernameByUserId(user.id), auth.requiresCurrentPassword(user.id)));
+      return ApiResponse.ok(AuthSessionResponse.from(
+          user,
+          auth.usernameByUserId(user.id),
+          auth.emailByUserId(user.id),
+          auth.requiresCurrentPassword(user.id)));
     } catch (ApiException err) {
       if ("AUTH_SESSION_INVALID".equals(err.code)) {
         clearSessionCookie(response);
@@ -336,6 +352,7 @@ class SocialController {
         throw ApiException.forbidden("AUTH_FORBIDDEN", "authorization", "you can only update your own profile");
       }
       auth.updateUsername(current.id, req.username);
+      auth.updateEmail(current.id, req.email);
       return ApiResponse.ok(social.updateUser(id, req));
     } catch (ApiException err) {
       return err.toResponse();
@@ -1729,6 +1746,15 @@ class AuthService {
         .orElse("");
   }
 
+  String emailByUserId(String userId) {
+    if (!Strings.hasText(userId)) return "";
+    return accounts.values().stream()
+        .filter(a -> userId.equals(a.userId))
+        .map(a -> Strings.value(a.email))
+        .findFirst()
+        .orElse("");
+  }
+
   boolean requiresCurrentPassword(String userId) {
     if (!Strings.hasText(userId)) return true;
     Account account = accounts.values().stream()
@@ -1760,6 +1786,31 @@ class AuthService {
       }
     }
     account.username = nextUsername;
+    account.updatedAt = Instant.now().toString();
+    persistence.saveAuthAccount(account);
+  }
+
+  synchronized void updateEmail(String userId, String nextEmailRaw) {
+    if (nextEmailRaw == null) return;
+    String nextEmail = nextEmailRaw.trim();
+    Account account = accounts.values().stream()
+        .filter(a -> userId.equals(a.userId))
+        .findFirst()
+        .orElseThrow(() -> ApiException.notFound("AUTH_ACCOUNT_NOT_FOUND", "credentials", "account not found"));
+    String current = Strings.value(account.email);
+    if (nextEmail.equalsIgnoreCase(current)) {
+      return;
+    }
+    if (!Strings.hasText(nextEmail)) {
+      throw ApiException.badRequest("AUTH_EMAIL_REQUIRED", "validation", "email is required");
+    }
+    for (Account existing : accounts.values()) {
+      if (existing == account) continue;
+      if (nextEmail.equalsIgnoreCase(Strings.value(existing.email))) {
+        throw ApiException.conflict("AUTH_EMAIL_TAKEN", "conflict", "email already registered");
+      }
+    }
+    account.email = nextEmail;
     account.updatedAt = Instant.now().toString();
     persistence.saveAuthAccount(account);
   }
@@ -3493,6 +3544,7 @@ class AuthResult {
 class AuthSessionResponse {
   public String id;
   public String username;
+  public String email;
   public boolean requireCurrentPassword;
   public String handle;
   public String displayName;
@@ -3505,10 +3557,11 @@ class AuthSessionResponse {
   public List<String> featuredTags = new ArrayList<>();
   public boolean isBot;
 
-  static AuthSessionResponse from(SocialUser user, String username, boolean requireCurrentPassword) {
+  static AuthSessionResponse from(SocialUser user, String username, String email, boolean requireCurrentPassword) {
     AuthSessionResponse res = new AuthSessionResponse();
     res.id = user.id;
     res.username = Strings.value(username);
+    res.email = Strings.value(email);
     res.requireCurrentPassword = requireCurrentPassword;
     res.handle = user.handle;
     res.displayName = user.displayName;
@@ -3586,6 +3639,7 @@ class CreateUserRequest {
 
 class UpdateUserRequest {
   public String username;
+  public String email;
   public String displayName;
   public String bio;
   public String instance;

@@ -12,6 +12,7 @@ import {
   fetchPostReplies,
   fetchPostThread,
   fetchSocialBootstrap,
+  fetchSocialHot,
   fetchSocialLatest,
   fetchSocialNews,
   fetchSocialInstances,
@@ -88,6 +89,7 @@ type FeedCard = {
   time: string;
   content: string;
   bio?: string;
+  isBot?: boolean;
   tags: string[];
   chainProof: string;
   chainId?: string;
@@ -719,8 +721,8 @@ async function loadExplorePostsTimeline(force = false) {
   explorePostsLoading.value = true;
   try {
     if (!apiOnline.value) return;
-    // "当前热门" follows product rule: show all non-news user posts in order.
-    const payload = await fetchSocialLatest(DEFAULT_FEED_LIMIT, 0);
+    // "当前热门" should come from hot ranking endpoint.
+    const payload = await fetchSocialHot(DEFAULT_FEED_LIMIT, 0);
     explorePostsTimeline.value = hydrateFeedCardList((payload.items || []).map(toFeedCard));
   } catch {
     // keep current timeline, avoid interrupting main flow
@@ -1539,6 +1541,7 @@ function toFeedCard(post: SocialPost): FeedCard {
     interaction: post.interaction || 'anyone',
     createdAt: post.createdAt,
     bio: person?.bio,
+    isBot: person?.isBot || false,
     tags: post.tags,
     chainProof: post.txHash || post.attestationUri || post.storageUri || 'unverified://pending',
     chainId: post.chainId,

@@ -18,6 +18,7 @@ const notice = ref('');
 
 // Form state
 const displayName = ref('');
+const email = ref('');
 const bio = ref('');
 const avatarUrl = ref('');
 const backgroundUrl = ref('');
@@ -36,6 +37,7 @@ const showHint = ref(true);
 onMounted(() => {
   if (currentUser.value) {
     displayName.value = currentUser.value.displayName || '';
+    email.value = currentUser.value.email || '';
     bio.value = currentUser.value.bio || '';
     avatarUrl.value = currentUser.value.avatarUrl || '';
     backgroundUrl.value = currentUser.value.backgroundUrl || '';
@@ -49,6 +51,7 @@ const hasChanges = computed(() => {
   if (!currentUser.value) return false;
   if (avatarFile.value || backgroundFile.value) return true;
   return displayName.value !== (currentUser.value.displayName || '') ||
+         email.value !== (currentUser.value.email || '') ||
          bio.value !== (currentUser.value.bio || '') ||
          avatarUrl.value !== (currentUser.value.avatarUrl || '') ||
          backgroundUrl.value !== (currentUser.value.backgroundUrl || '') ||
@@ -75,6 +78,7 @@ async function handleSave() {
     }
 
     const updatedUser = await updateUserProfile(currentUser.value.id, {
+      email: email.value,
       displayName: displayName.value,
       bio: bio.value,
       avatarUrl: nextAvatarUrl,
@@ -293,6 +297,19 @@ onUnmounted(() => {
           class="w-full bg-transparent text-xl font-medium text-[color:var(--text-primary)] outline-none border-b border-[color:var(--border-color)] focus:border-emerald-500 transition-colors py-2"
           placeholder="你的称呼"
         />
+      </div>
+
+      <div class="rounded-3xl border border-[color:var(--border-color)] bg-[var(--panel-soft)] p-8">
+        <div class="flex items-center justify-between mb-4">
+          <label class="text-sm font-bold text-[color:var(--text-primary)] uppercase tracking-wider">绑定邮箱</label>
+        </div>
+        <input
+          v-model="email"
+          type="email"
+          class="w-full bg-transparent text-base font-medium text-[color:var(--text-primary)] outline-none border-b border-[color:var(--border-color)] focus:border-emerald-500 transition-colors py-2"
+          placeholder="输入邮箱地址"
+        />
+        <div class="mt-2 text-xs text-[color:var(--text-muted)]">一个邮箱只能绑定一个账号。</div>
       </div>
 
       <!-- Bio -->

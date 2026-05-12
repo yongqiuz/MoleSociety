@@ -6,6 +6,7 @@ import { API_BASE } from '../config/backend';
 export type AuthSession = {
   id: string;
   username: string;
+  email: string;
   requireCurrentPassword?: boolean;
   handle: string;
   displayName: string;
