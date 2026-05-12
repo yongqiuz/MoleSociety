@@ -3823,7 +3823,10 @@ watch(
                       <div class="text-xl font-semibold text-[color:var(--text-primary)]">消息</div>
                       <div class="mt-1 text-sm text-[color:var(--text-muted)]">选择一个联系人开始聊天</div>
                     </div>
-                    <div class="flex h-7 min-w-7 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold leading-none text-white shadow-sm">
+                    <div
+                      v-if="unreadConversationCount > 0"
+                      class="flex h-7 min-w-7 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold leading-none text-white shadow-sm"
+                    >
                       {{ unreadConversationCount > 99 ? '99+' : unreadConversationCount }}
                     </div>
                   </div>
